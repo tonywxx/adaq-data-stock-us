@@ -1,0 +1,38 @@
+[package]
+name = "adaq-data-stock-us"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Rust reimplementation of yfinance for US equity market data from Yahoo Finance."
+repository = "https://github.com/tonywxx/adaq-data-stock-us"
+readme = "README.md"
+keywords = ["finance", "yfinance", "stocks", "yahoo", "market-data"]
+categories = ["finance", "api-bindings"]
+
+[workspace]
+members = ["xtask"]
+
+[dependencies]
+primp = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+prost = "0.13"
+base64 = "0.22"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Provide a rustls crypto provider (tokio-tungstenite pulls rustls with
+# default-features = false, so none is selected automatically). Exactly one
+# provider feature must be enabled for rustls 0.23 to pick a default.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+polars = { version = "0.43", optional = true }
+
+[features]
+default = []
+polars = ["dep:polars"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

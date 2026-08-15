@@ -1,0 +1,3 @@
+[submodule "vendor/yfinance"]
+	path = vendor/yfinance
+	url = https://github.com/ranaroussi/yfinance
