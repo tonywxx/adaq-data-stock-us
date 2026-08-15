@@ -210,6 +210,51 @@ impl YfSession {
         }
     }
 
+    /// Perform a GET returning the raw response body as text, with cookie/
+    /// consent bootstrap and retry/backoff. Used for endpoints that return HTML
+    /// or non-JSON text (e.g. the Business Insider ISIN suggest endpoint).
+    /// Unlike [`YfSession::get_json`], no crumb is injected and the body is not
+    /// parsed.
+    pub async fn get_text(&self, url: &str, params: &[(&str, String)]) -> Result<String> {
+        let retries = self.inner.config.retries;
+        let mut attempt: u32 = 0;
+        loop {
+            self.ensure_cookie().await?;
+            let req = self
+                .inner
+                .client
+                .get(url)
+                .header("accept", "*/*")
+                .query(&params);
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(_e) if attempt < retries => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(2u64.saturating_pow(attempt))).await;
+                    continue;
+                }
+                Err(e) => return Err(YfError::Http(e)),
+            };
+            let status = resp.status();
+            if status == 429 {
+                return Err(YfError::RateLimited);
+            }
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                if attempt < retries && status.is_server_error() {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(2u64.saturating_pow(attempt))).await;
+                    continue;
+                }
+                return Err(YfError::Status {
+                    status: status.as_u16(),
+                    body,
+                });
+            }
+            return Ok(resp.text().await?);
+        }
+    }
+
     /// Perform a POST returning parsed JSON.
     pub async fn post_json(
         &self,

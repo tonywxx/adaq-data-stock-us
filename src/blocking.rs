@@ -173,6 +173,58 @@ impl Client {
         block_on(self.inner.screen(query, opts))
     }
 
+    // --- Ticker identifier resolution + per-ticker news/earnings/ISIN ---
+
+    /// Resolve an ISIN to a Yahoo ticker symbol.
+    pub fn resolve_isin(&self, isin: &str) -> Result<String> {
+        block_on(self.inner.resolve_isin(isin))
+    }
+
+    /// Latest news for a ticker. `tab` is `"news"`, `"all"`, or `"press releases"`.
+    pub fn news(
+        &self,
+        ticker: &str,
+        count: usize,
+        tab: &str,
+    ) -> Result<Vec<crate::news::NewsArticle>> {
+        block_on(self.inner.news(ticker, count, tab))
+    }
+
+    /// Reverse lookup: ticker → ISIN.
+    pub fn isin(&self, ticker: &str) -> Result<String> {
+        block_on(self.inner.isin(ticker))
+    }
+
+    /// Scheduled / reported earnings dates for a ticker, newest first.
+    pub fn earnings_dates(
+        &self,
+        ticker: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::earnings::EarningsDate>> {
+        block_on(self.inner.earnings_dates(ticker, limit))
+    }
+
+    /// A blocking ticker from a `(symbol, MIC)` pair.
+    pub fn ticker_from_mic(&self, symbol: &str, mic: &str) -> Result<Ticker> {
+        Ok(Ticker {
+            inner: AsyncTicker::from_mic(symbol, mic, self.inner.clone())?,
+        })
+    }
+
+    /// A blocking ticker from an ISIN.
+    pub fn ticker_from_isin(&self, isin: &str) -> Result<Ticker> {
+        Ok(Ticker {
+            inner: block_on(AsyncTicker::from_isin(isin, self.inner.clone()))?,
+        })
+    }
+
+    /// A blocking ticker from any [`crate::TickerId`].
+    pub fn ticker_from_id(&self, id: crate::TickerId) -> Result<Ticker> {
+        Ok(Ticker {
+            inner: block_on(AsyncTicker::from_id(id, self.inner.clone()))?,
+        })
+    }
+
     /// An auth/entitlement helper bound to this client's session.
     pub fn auth(&self) -> crate::auth::Auth {
         self.inner.auth()
@@ -281,5 +333,20 @@ impl Ticker {
     /// Option chain.
     pub fn option_chain(&self) -> Result<crate::options::OptionChain> {
         block_on(self.inner.option_chain())
+    }
+
+    /// Latest news for this ticker.
+    pub fn news(&self, count: usize, tab: &str) -> Result<Vec<crate::news::NewsArticle>> {
+        block_on(self.inner.news(count, tab))
+    }
+
+    /// Reverse lookup: this ticker's ISIN.
+    pub fn isin(&self) -> Result<String> {
+        block_on(self.inner.isin())
+    }
+
+    /// Scheduled / reported earnings dates for this ticker, newest first.
+    pub fn earnings_dates(&self, limit: usize) -> Result<Vec<crate::earnings::EarningsDate>> {
+        block_on(self.inner.earnings_dates(limit))
     }
 }

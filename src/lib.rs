@@ -26,12 +26,16 @@ pub mod calendars;
 pub mod client;
 pub mod config;
 pub mod domain;
+pub mod earnings;
 pub mod error;
 pub mod fundamentals;
 pub mod history;
 pub mod http;
+pub mod isin;
 pub mod live;
 pub mod lookup;
+pub mod mic;
+pub mod news;
 pub mod options;
 pub mod quote;
 pub mod screener;
@@ -42,17 +46,20 @@ pub use calendars::{
     CalendarColumn, CalendarOperand, CalendarQuery, CalendarResult, EarningsEvent, EconomicEvent,
     IpoEvent, SplitEvent,
 };
-pub use client::{Client, DownloadResult, Ticker, download};
+pub use client::{Client, DownloadResult, Ticker, TickerId, download};
 pub use config::Config;
-pub use domain::{Company, Industry, Market, MarketRegion, MarketSummaryRow, Sector};
+pub use earnings::EarningsDate;
 pub use error::{Result, YfError};
 pub use fundamentals::{Financials, Freq, Statement};
 pub use history::{
     Actions, Bar, CapitalGain, Dividend, History, HistoryMeta, HistoryOptions, Interval, Split,
 };
 pub use http::YfSession;
+pub use isin::{isin_for_ticker, resolve_isin};
 pub use live::{LiveWebSocket, PricingData};
 pub use lookup::{LookupResult, LookupRow};
+pub use mic::{MIC_TO_YAHOO_SUFFIX, is_isin, mic_to_suffix, resolve_symbol};
+pub use news::NewsArticle;
 pub use options::{ExpirationOptions, OptionChain, OptionContract};
 pub use quote::{
     AnalystPriceTargets, FastInfo, HolderRow, Holders, Info, RecommendationTrend, Sustainability,

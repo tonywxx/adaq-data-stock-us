@@ -40,6 +40,9 @@ Phases: **P1** HTTP core + history + download; **P2** quote/fundamentals/options
 | `live` (WebSocket) | `live.py`, `pricing.proto` | P4 | done |
 | `auth` (login) | `data.py` (`Auth`) | P4 | done |
 | `config` | `config.py` | P1 | done |
+| `news` (per-ticker) | `base.py` (`get_news` → `xhr/ncp`) | P2 | done |
+| `earnings_dates` (per-ticker) | `base.py` (`get_earnings_dates`) | P2 | done |
+| `isin` (reverse ticker→ISIN) | `base.py` (`get_isin`) | P2 | done |
 
 ## Shared / cross-cutting
 
@@ -47,4 +50,4 @@ Phases: **P1** HTTP core + history + download; **P2** quote/fundamentals/options
 |---------|-----------------|-------|--------|
 | Parsing & price-repair | `utils.py` | P1 | partial |
 | Endpoints & URL constants | `const.py` | P1 | done |
-| ISIN / MIC resolution | `base.py` (`get_isin`), `const.py` (`_MIC_TO_YAHOO_SUFFIX`) | P2 | todo |
+| ISIN / MIC resolution | `base.py` (ISIN↔ticker), `const.py` (`_MIC_TO_YAHOO_SUFFIX`) | P2 | done (`src/mic.rs`, `src/isin.rs`) |

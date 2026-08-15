@@ -4,9 +4,13 @@
 use std::sync::Arc;
 
 use crate::config::Config;
+use crate::earnings::EarningsDate;
 use crate::error::{Result, YfError};
 use crate::history::{History, HistoryOptions};
 use crate::http::YfSession;
+use crate::isin::{isin_for_ticker, resolve_isin};
+use crate::mic::{is_isin, resolve_symbol};
+use crate::news::NewsArticle;
 
 /// Async Yahoo Finance client. Cheap to clone (shares one session + cache).
 #[derive(Clone)]
@@ -181,6 +185,32 @@ impl Client {
         self.session.screen(query, opts).await
     }
 
+    // --- Ticker identifier resolution ---
+
+    /// Resolve an ISIN to a Yahoo ticker symbol (mirrors `utils.get_ticker_by_isin`).
+    pub async fn resolve_isin(&self, isin: &str) -> Result<String> {
+        resolve_isin(self.session(), isin).await
+    }
+
+    // --- Per-ticker news / earnings / ISIN ---
+
+    /// Latest news for a ticker (mirrors `Ticker.get_news`). `tab` is
+    /// `"news"` (default), `"all"`, or `"press releases"`.
+    pub async fn news(&self, ticker: &str, count: usize, tab: &str) -> Result<Vec<NewsArticle>> {
+        self.session.news(ticker, count, tab).await
+    }
+
+    /// Reverse lookup: ticker → ISIN (mirrors `Ticker.get_isin`, experimental).
+    pub async fn isin(&self, ticker: &str) -> Result<String> {
+        isin_for_ticker(self.session(), ticker).await
+    }
+
+    /// Scheduled / reported earnings dates for a ticker, newest first
+    /// (mirrors `Ticker.get_earnings_dates`). `limit` is capped at 100.
+    pub async fn earnings_dates(&self, ticker: &str, limit: usize) -> Result<Vec<EarningsDate>> {
+        self.session.earnings_dates(ticker, limit).await
+    }
+
     // --- P4: auth / live ---
 
     /// An auth/entitlement helper bound to this client's session.
@@ -209,12 +239,51 @@ pub struct Ticker {
     symbol: String,
 }
 
+/// A security identifier accepted by [`Ticker::from_id`], mirroring the forms
+/// yfinance's `Ticker` constructor accepts: a bare symbol, a `(symbol, MIC)`
+/// pair, or an ISIN.
+#[derive(Clone)]
+pub enum TickerId {
+    /// A Yahoo symbol, e.g. `"AAPL"` or `"OR.PA"`.
+    Symbol(String),
+    /// A `(symbol, MIC)` pair, e.g. `("OR", "XPAR")`.
+    Pair(String, String),
+    /// An ISIN, resolved to a Yahoo symbol on construction.
+    Isin(String),
+}
+
 impl Ticker {
     /// Create a ticker handle under the given client.
     pub fn new(symbol: impl Into<String>, client: Client) -> Self {
         Self {
             client,
             symbol: symbol.into(),
+        }
+    }
+
+    /// Create a ticker from a `(symbol, MIC)` pair, resolving it to a Yahoo
+    /// symbol synchronously (mirrors `Ticker("OR", "XPAR")`).
+    pub fn from_mic(symbol: &str, mic: &str, client: Client) -> Result<Self> {
+        let resolved = resolve_symbol(symbol, mic)?;
+        Ok(Self::new(resolved, client))
+    }
+
+    /// Create a ticker from an ISIN, resolving it to a Yahoo symbol via the
+    /// cache / search (mirrors `Ticker("US0378331005")`).
+    pub async fn from_isin(isin: &str, client: Client) -> Result<Self> {
+        if !is_isin(isin) {
+            return Err(YfError::msg(format!("Invalid ISIN number: {isin}")));
+        }
+        let resolved = resolve_isin(client.session(), isin).await?;
+        Ok(Self::new(resolved, client))
+    }
+
+    /// Create a ticker from any [`TickerId`].
+    pub async fn from_id(id: TickerId, client: Client) -> Result<Self> {
+        match id {
+            TickerId::Symbol(s) => Ok(Self::new(s, client)),
+            TickerId::Pair(s, mic) => Self::from_mic(&s, &mic, client),
+            TickerId::Isin(isin) => Self::from_isin(&isin, client).await,
         }
     }
 
@@ -301,6 +370,25 @@ impl Ticker {
     /// Option chain (mirrors `Ticker.option_chain`).
     pub async fn option_chain(&self) -> Result<crate::options::OptionChain> {
         self.client.option_chain(&self.symbol).await
+    }
+
+    // --- Per-ticker news / earnings / ISIN ---
+
+    /// Latest news for this ticker (mirrors `Ticker.get_news`). `tab` is
+    /// `"news"` (default), `"all"`, or `"press releases"`.
+    pub async fn news(&self, count: usize, tab: &str) -> Result<Vec<NewsArticle>> {
+        self.client.news(&self.symbol, count, tab).await
+    }
+
+    /// Reverse lookup: this ticker's ISIN (mirrors `Ticker.get_isin`).
+    pub async fn isin(&self) -> Result<String> {
+        self.client.isin(&self.symbol).await
+    }
+
+    /// Scheduled / reported earnings dates for this ticker, newest first
+    /// (mirrors `Ticker.get_earnings_dates`).
+    pub async fn earnings_dates(&self, limit: usize) -> Result<Vec<EarningsDate>> {
+        self.client.earnings_dates(&self.symbol, limit).await
     }
 }
 
