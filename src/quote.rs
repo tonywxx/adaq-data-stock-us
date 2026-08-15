@@ -5,6 +5,7 @@
 //! we request the relevant modules and parse typed structs. The full raw JSON
 //! is retained on [`Info::raw`] so no upstream field is lost.
 
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -329,6 +330,500 @@ impl YfSession {
     }
 }
 
+// ---- Analysis / estimates (mirrors base.py get_*_estimate etc.) ----
+
+/// A generic labelled table (rows indexed by `index`, columns by `columns`),
+/// mirroring the DataFrame shape yfinance returns for estimates and trends.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NamedTable {
+    pub index: Vec<String>,
+    pub columns: Vec<String>,
+    pub values: Vec<Vec<Option<f64>>>,
+}
+
+impl NamedTable {
+    /// Look up a cell by row label and column name.
+    pub fn get(&self, row: &str, col: &str) -> Option<f64> {
+        let ri = self.index.iter().position(|r| r == row)?;
+        let ci = self.columns.iter().position(|c| c == col)?;
+        self.values
+            .get(ri)
+            .and_then(|r| r.get(ci))
+            .copied()
+            .flatten()
+    }
+}
+
+fn parse_named_table(
+    result: &Value,
+    module: &str,
+    array_key: &str,
+    label_key: &str,
+    metrics: &[&str],
+) -> NamedTable {
+    let arr = dig(result, &[module, array_key])
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut index = Vec::with_capacity(arr.len());
+    let mut values = Vec::with_capacity(arr.len());
+    for obj in &arr {
+        let label = dig(obj, &[label_key])
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let row: Vec<Option<f64>> = metrics
+            .iter()
+            .map(|m| dig(obj, &[m]).and_then(|v| v.as_f64()))
+            .collect();
+        index.push(label);
+        values.push(row);
+    }
+    NamedTable {
+        index,
+        columns: metrics.iter().map(|s| s.to_string()).collect(),
+        values,
+    }
+}
+
+fn ts_to_date(sec: Option<f64>) -> Option<DateTime<Utc>> {
+    sec.and_then(|s| DateTime::from_timestamp(s as i64, 0))
+}
+
+/// A single upgrades/downgrades (rating change) event.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpgradesDowngrades {
+    pub date: Option<DateTime<Utc>>,
+    pub firm: Option<String>,
+    pub to_grade: Option<String>,
+    pub from_grade: Option<String>,
+    pub action: Option<String>,
+}
+
+impl YfSession {
+    /// Earnings estimates table (mirrors `get_earnings_estimate`).
+    pub async fn earnings_estimate(&self, ticker: &str) -> Result<NamedTable> {
+        let r = quote_summary(self, ticker, &["earningsTrend"]).await?;
+        Ok(parse_named_table(
+            &r,
+            "earningsTrend",
+            "earningsTrend",
+            "period",
+            &[
+                "numberOfAnalysts",
+                "avg",
+                "low",
+                "high",
+                "yearAgo",
+                "growth",
+            ],
+        ))
+    }
+
+    /// Revenue estimates table (mirrors `get_revenue_estimate`).
+    pub async fn revenue_estimate(&self, ticker: &str) -> Result<NamedTable> {
+        let r = quote_summary(self, ticker, &["revenueTrend"]).await?;
+        Ok(parse_named_table(
+            &r,
+            "revenueTrend",
+            "revenueTrend",
+            "period",
+            &[
+                "numberOfAnalysts",
+                "avg",
+                "low",
+                "high",
+                "yearAgo",
+                "growth",
+            ],
+        ))
+    }
+
+    /// Reported vs estimated EPS history (mirrors `get_earnings_history`).
+    pub async fn earnings_history(&self, ticker: &str) -> Result<NamedTable> {
+        let r = quote_summary(self, ticker, &["earningsHistory"]).await?;
+        Ok(parse_named_table(
+            &r,
+            "earningsHistory",
+            "history",
+            "quarter",
+            &[
+                "epsEstimate",
+                "epsActual",
+                "epsDifference",
+                "surprisePercent",
+            ],
+        ))
+    }
+
+    /// EPS revision trend table (mirrors `get_eps_trend`).
+    pub async fn eps_trend(&self, ticker: &str) -> Result<NamedTable> {
+        let r = quote_summary(self, ticker, &["epsTrend"]).await?;
+        Ok(parse_named_table(
+            &r,
+            "epsTrend",
+            "epsTrend",
+            "period",
+            &["current", "7daysAgo", "30daysAgo", "60daysAgo", "90daysAgo"],
+        ))
+    }
+
+    /// EPS revisions table (mirrors `get_eps_revisions`).
+    pub async fn eps_revisions(&self, ticker: &str) -> Result<NamedTable> {
+        let r = quote_summary(self, ticker, &["epsRevisions"]).await?;
+        Ok(parse_named_table(
+            &r,
+            "epsRevisions",
+            "epsRevisions",
+            "period",
+            &[
+                "upLast7days",
+                "upLast30days",
+                "downLast7days",
+                "downLast30days",
+            ],
+        ))
+    }
+
+    /// Growth estimates table (mirrors `get_growth_estimates`).
+    pub async fn growth_estimates(&self, ticker: &str) -> Result<NamedTable> {
+        let r = quote_summary(self, ticker, &["growth"]).await?;
+        Ok(parse_named_table(
+            &r,
+            "growth",
+            "growth",
+            "period",
+            &["stock", "industry", "sector", "index"],
+        ))
+    }
+
+    /// Recommendation summary (alias of `recommendation_trend`, mirrors
+    /// `get_recommendations` / `get_recommendations_summary`).
+    pub async fn recommendations(&self, ticker: &str) -> Result<Vec<RecommendationTrend>> {
+        self.recommendation_trend(ticker).await
+    }
+
+    /// Upgrades / downgrades (rating changes), mirrors `get_upgrades_downgrades`.
+    pub async fn upgrades_downgrades(&self, ticker: &str) -> Result<Vec<UpgradesDowngrades>> {
+        let r = quote_summary(self, ticker, &["upgradeDowngradeHistory"]).await?;
+        let arr = dig(&r, &["upgradeDowngradeHistory", "history"])
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(arr
+            .iter()
+            .map(|o| UpgradesDowngrades {
+                date: ts_to_date(dig(o, &["date", "raw"]).and_then(|v| v.as_f64())),
+                firm: dig(o, &["firm"]).and_then(|v| v.as_str()).map(String::from),
+                to_grade: dig(o, &["toGrade"])
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                from_grade: dig(o, &["fromGrade"])
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                action: dig(o, &["action"])
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            })
+            .collect())
+    }
+
+    /// Valuation measures table (mirrors `get_valuation_measures`). A single
+    /// `Current` column is returned; the period-history columns from yfinance
+    /// are sourced from a separate time-series not in `quoteSummary`, so are
+    /// omitted here.
+    pub async fn valuation_measures(&self, ticker: &str) -> Result<NamedTable> {
+        let modules = [
+            "price",
+            "summaryDetail",
+            "defaultKeyStatistics",
+            "financialData",
+        ];
+        let r = quote_summary(self, ticker, &modules).await?;
+        Ok(parse_valuation_measures(&r))
+    }
+
+    /// Earnings / dividend calendar (mirrors `get_calendar`).
+    pub async fn ticker_calendar(&self, ticker: &str) -> Result<Calendar> {
+        let r = quote_summary(self, ticker, &["calendarEvents"]).await?;
+        Ok(parse_calendar_events(&r))
+    }
+
+    /// SEC filings (mirrors `get_sec_filings`).
+    pub async fn sec_filings(&self, ticker: &str) -> Result<Vec<SecFiling>> {
+        let r = quote_summary(self, ticker, &["secFilings"]).await?;
+        Ok(parse_sec_filings(&r))
+    }
+
+    /// Current shares outstanding (mirrors `get_shares`).
+    pub async fn shares(&self, ticker: &str) -> Result<Option<f64>> {
+        let info = self.info(ticker).await?;
+        Ok(info.shares_outstanding)
+    }
+
+    /// Full share-count time series (mirrors `get_shares_full`).
+    pub async fn shares_full(
+        &self,
+        ticker: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<Vec<(DateTime<Utc>, f64)>> {
+        let urls = Self::urls();
+        let url = format!(
+            "{}/ws/fundamentals-timeseries/v1/finance/timeseries/{}",
+            urls.query2, ticker
+        );
+        let now = Utc::now();
+        let end = end.unwrap_or(now);
+        let start = start.unwrap_or_else(|| end - chrono::Duration::days(548));
+        let params = vec![
+            ("symbol", ticker.to_string()),
+            ("period1", start.timestamp().to_string()),
+            ("period2", end.timestamp().to_string()),
+        ];
+        let v = self.get_json(&url, &params).await?;
+        let series = v
+            .get("timeseries")
+            .and_then(|t| t.get("result"))
+            .and_then(|r| r.as_array())
+            .and_then(|a| a.first())
+            .and_then(|r| r.get("shares_out"))
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(series.len());
+        for point in &series {
+            let ts = point.get("timestamp").and_then(|x| x.as_i64());
+            let val = point.get("value").and_then(|x| x.as_f64());
+            if let (Some(ts), Some(val)) = (ts, val)
+                && let Some(dt) = DateTime::from_timestamp(ts, 0)
+            {
+                out.push((dt, val));
+            }
+        }
+        out.sort_by_key(|(dt, _)| *dt);
+        Ok(out)
+    }
+
+    /// Mutual-fund / ETF data (mirrors `get_funds_data`).
+    pub async fn funds_data(&self, ticker: &str) -> Result<FundsData> {
+        let modules = [
+            "fundProfile",
+            "fundOverview",
+            "topHoldings",
+            "fundPerformance",
+        ];
+        let r = quote_summary(self, ticker, &modules).await?;
+        let fp = dig(&r, &["fundProfile"]).unwrap_or(&Value::Null);
+        let th = dig(&r, &["topHoldings"]).unwrap_or(&Value::Null);
+        let f = |p: &[&str]| dig(&r, p).and_then(|v| v.as_f64());
+        let fs = |p: &[&str]| dig(&r, p).and_then(|v| v.as_str()).map(String::from);
+        let sector_weightings = dig(fp, &["sectorWeightings"])
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| {
+                        let (sector, weight) = s.as_object()?.iter().next()?;
+                        Some((
+                            sector.clone(),
+                            weight
+                                .get("raw")
+                                .and_then(|x| x.as_f64())
+                                .or_else(|| weight.as_f64()),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let top_holdings = dig(th, &["holdings"])
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|h| FundHolding {
+                        symbol: dig(h, &["symbol"])
+                            .and_then(|x| x.as_str())
+                            .map(String::from),
+                        name: dig(h, &["holdingName"])
+                            .and_then(|x| x.as_str())
+                            .map(String::from),
+                        holding_percent: dig(h, &["holdingPercent", "raw"])
+                            .and_then(|x| x.as_f64()),
+                        value: dig(h, &["value", "raw"]).and_then(|x| x.as_f64()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(FundsData {
+            family: fs(&["fundProfile", "family"]),
+            category_name: fs(&["fundProfile", "categoryName"]),
+            legal_type: fs(&["fundProfile", "legalType"]),
+            fund_inception_date: ts_to_date(f(&["fundProfile", "fundInceptionDate", "raw"])),
+            nav_price: f(&["fundOverview", "navPrice", "raw"]),
+            total_assets: f(&["fundOverview", "totalAssets", "raw"]),
+            expense_ratio: f(&["fundOverview", "expenseRatio", "raw"]),
+            ytd_return: f(&["fundPerformance", "ytdReturn", "raw"]),
+            trailing_return_y1: f(&["fundPerformance", "trailingReturnYTD", "raw"]),
+            sector_weightings,
+            top_holdings,
+            raw: r.clone(),
+        })
+    }
+}
+
+/// Earnings / dividend calendar (mirrors `Ticker.get_calendar`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Calendar {
+    pub earnings_date: Option<DateTime<Utc>>,
+    pub earnings_time: Option<String>,
+    pub eps_estimate: Option<f64>,
+    pub revenue_estimate: Option<f64>,
+    pub ex_dividend_date: Option<DateTime<Utc>>,
+    pub dividend_date: Option<DateTime<Utc>>,
+    pub previous_fiscal_year_end: Option<DateTime<Utc>>,
+    pub next_fiscal_year_end: Option<DateTime<Utc>>,
+    pub most_recent_quarter: Option<DateTime<Utc>>,
+    pub next_quarter: Option<DateTime<Utc>>,
+}
+
+/// A single SEC filing (mirrors `Ticker.get_sec_filings`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SecFiling {
+    pub date: Option<DateTime<Utc>>,
+    pub type_: Option<String>,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub editor: Option<String>,
+}
+
+/// Mutual-fund / ETF data (mirrors `Ticker.get_funds_data`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FundsData {
+    pub family: Option<String>,
+    pub category_name: Option<String>,
+    pub legal_type: Option<String>,
+    pub fund_inception_date: Option<DateTime<Utc>>,
+    pub nav_price: Option<f64>,
+    pub total_assets: Option<f64>,
+    pub expense_ratio: Option<f64>,
+    pub ytd_return: Option<f64>,
+    pub trailing_return_y1: Option<f64>,
+    pub sector_weightings: Vec<(String, Option<f64>)>,
+    pub top_holdings: Vec<FundHolding>,
+    pub raw: Value,
+}
+
+/// A top holding within [`FundsData`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FundHolding {
+    pub symbol: Option<String>,
+    pub name: Option<String>,
+    pub holding_percent: Option<f64>,
+    pub value: Option<f64>,
+}
+
+fn parse_calendar_events(result: &Value) -> Calendar {
+    let ce = dig(result, &["calendarEvents"]).unwrap_or(&Value::Null);
+    let earnings = dig(ce, &["earnings"]).unwrap_or(&Value::Null);
+    let dt = |p: &[&str]| ts_to_date(dig(ce, p).and_then(|v| v.as_f64()));
+    Calendar {
+        earnings_date: dt(&["earnings", "earningsDate", "raw"]).or_else(|| {
+            ts_to_date(dig(earnings, &["earningsDate", "raw"]).and_then(|v| v.as_f64()))
+        }),
+        earnings_time: dig(ce, &["earnings", "earningsTime"])
+            .and_then(|v| v.as_str())
+            .or_else(|| dig(earnings, &["earningsTime"]).and_then(|v| v.as_str()))
+            .map(String::from),
+        eps_estimate: dig(earnings, &["epsEstimate", "raw"]).and_then(|v| v.as_f64()),
+        revenue_estimate: dig(earnings, &["revenueEstimate", "raw"]).and_then(|v| v.as_f64()),
+        ex_dividend_date: dt(&["exDividendDate", "raw"]),
+        dividend_date: dt(&["dividendDate", "raw"]),
+        previous_fiscal_year_end: dt(&["previousFiscalYearEnd", "raw"]),
+        next_fiscal_year_end: dt(&["nextFiscalYearEnd", "raw"]),
+        most_recent_quarter: dt(&["mostRecentQuarter", "raw"]),
+        next_quarter: dt(&["nextQuarter", "raw"]),
+    }
+}
+
+fn parse_sec_filings(result: &Value) -> Vec<SecFiling> {
+    let arr = dig(result, &["secFilings", "filings"])
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    arr.iter()
+        .map(|o| {
+            // secFilings dates are date strings ("YYYY-MM-DD"), not epoch seconds.
+            let date = dig(o, &["date", "raw"])
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                        .ok()
+                        .and_then(|d| d.and_hms_opt(0, 0, 0))
+                        .map(|naive| DateTime::from_naive_utc_and_offset(naive, Utc))
+                });
+            SecFiling {
+                date,
+                type_: dig(o, &["type"]).and_then(|v| v.as_str()).map(String::from),
+                title: dig(o, &["title"])
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                url: dig(o, &["url"]).and_then(|v| v.as_str()).map(String::from),
+                editor: dig(o, &["editor"])
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            }
+        })
+        .collect()
+}
+
+fn parse_valuation_measures(result: &Value) -> NamedTable {
+    let measures = [
+        (
+            "Market Cap",
+            dig(result, &["price", "marketCap"]).and_then(|v| v.as_f64()),
+        ),
+        (
+            "Enterprise Value",
+            dig(result, &["defaultKeyStatistics", "enterpriseValue"]).and_then(|v| v.as_f64()),
+        ),
+        (
+            "Trailing P/E",
+            dig(result, &["summaryDetail", "trailingPE"]).and_then(|v| v.as_f64()),
+        ),
+        (
+            "Forward P/E",
+            dig(result, &["summaryDetail", "forwardPE"]).and_then(|v| v.as_f64()),
+        ),
+        (
+            "PEG Ratio",
+            dig(result, &["defaultKeyStatistics", "pegRatio"]).and_then(|v| v.as_f64()),
+        ),
+        (
+            "Price/Book",
+            dig(result, &["defaultKeyStatistics", "priceToBook"]).and_then(|v| v.as_f64()),
+        ),
+        (
+            "Enterprise Value/Revenue",
+            dig(
+                result,
+                &["defaultKeyStatistics", "enterpriseValueToRevenue"],
+            )
+            .and_then(|v| v.as_f64()),
+        ),
+        (
+            "Enterprise Value/EBITDA",
+            dig(result, &["defaultKeyStatistics", "enterpriseValueToEbitda"])
+                .and_then(|v| v.as_f64()),
+        ),
+    ];
+    let index = measures.iter().map(|(m, _)| m.to_string()).collect();
+    let values = measures.iter().map(|(_, v)| vec![*v]).collect();
+    NamedTable {
+        index,
+        columns: vec!["Current".to_string()],
+        values,
+    }
+}
+
 fn parse_holder_table(result: &Value, path: &[&str]) -> Vec<HolderRow> {
     dig(result, path)
         .and_then(|v| v.as_array())
@@ -358,4 +853,69 @@ fn dig<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
         return Some(raw);
     }
     Some(cur)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn named_table_lookup() {
+        let t = parse_named_table(
+            &json!({"earningsTrend": {"earningsTrend": [
+                {"period": "0q", "avg": {"raw": 1.5}, "high": {"raw": 2.0}},
+                {"period": "0y", "avg": {"raw": 3.0}}
+            ]}}),
+            "earningsTrend",
+            "earningsTrend",
+            "period",
+            &["avg", "high"],
+        );
+        assert_eq!(t.index, vec!["0q", "0y"]);
+        assert_eq!(t.columns, vec!["avg", "high"]);
+        assert_eq!(t.get("0q", "avg"), Some(1.5));
+        assert_eq!(t.get("0q", "high"), Some(2.0));
+        assert_eq!(t.get("0y", "high"), None);
+        assert_eq!(t.get("missing", "avg"), None);
+    }
+
+    #[test]
+    fn parses_calendar_events() {
+        let r = json!({"calendarEvents": {
+            "earnings": {"earningsDate": {"raw": 1700000000, "fmt": "2023-11-01"}, "earningsTime": "amc", "epsEstimate": {"raw": 1.2}},
+            "exDividendDate": {"raw": 1690000000},
+            "dividendDate": {"raw": 1695000000}
+        }});
+        let c = parse_calendar_events(&r);
+        assert!(c.earnings_date.is_some());
+        assert_eq!(c.earnings_time.as_deref(), Some("amc"));
+        assert_eq!(c.eps_estimate, Some(1.2));
+        assert!(c.ex_dividend_date.is_some());
+    }
+
+    #[test]
+    fn parses_sec_filings_dates() {
+        let r = json!({"secFilings": {"filings": [
+            {"date": {"raw": "2023-01-15", "fmt": "Jan 15, 2023"}, "type": "10-K", "title": "Annual report"}
+        ]}});
+        let f = parse_sec_filings(&r);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].type_.as_deref(), Some("10-K"));
+        assert!(f[0].date.is_some());
+    }
+
+    #[test]
+    fn parses_valuation_measures() {
+        let r = json!({
+            "price": {"marketCap": {"raw": 3_000_000_000_000.0}},
+            "summaryDetail": {"trailingPE": {"raw": 30.0}},
+            "defaultKeyStatistics": {"enterpriseValue": {"raw": 2_900_000_000_000.0}, "pegRatio": {"raw": 2.1}}
+        });
+        let v = parse_valuation_measures(&r);
+        assert_eq!(v.columns, vec!["Current".to_string()]);
+        assert_eq!(v.get("Market Cap", "Current"), Some(3_000_000_000_000.0));
+        assert_eq!(v.get("Trailing P/E", "Current"), Some(30.0));
+        assert_eq!(v.get("PEG Ratio", "Current"), Some(2.1));
+    }
 }

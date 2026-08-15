@@ -62,7 +62,8 @@ pub use mic::{MIC_TO_YAHOO_SUFFIX, is_isin, mic_to_suffix, resolve_symbol};
 pub use news::NewsArticle;
 pub use options::{ExpirationOptions, OptionChain, OptionContract};
 pub use quote::{
-    AnalystPriceTargets, FastInfo, HolderRow, Holders, Info, RecommendationTrend, Sustainability,
+    AnalystPriceTargets, Calendar, FastInfo, FundHolding, FundsData, HolderRow, Holders, Info,
+    NamedTable, RecommendationTrend, SecFiling, Sustainability, UpgradesDowngrades,
 };
 pub use screener::{
     ETFQuery, EquityQuery, FundQuery, Operand, Operator, Query, QueryKind, ScreenOptions,

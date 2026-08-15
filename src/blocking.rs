@@ -4,11 +4,14 @@
 //! [`crate::block_on`]. This is the ergonomic entry point for callers who do
 //! not want to write `async` (mirrors yfinance's synchronous API).
 
+use chrono::{DateTime, Utc};
+
 use crate::block_on;
 use crate::client::{Client as AsyncClient, DownloadResult, Ticker as AsyncTicker};
 use crate::config::Config;
 use crate::error::Result;
-use crate::history::{History, HistoryOptions};
+use crate::history::{History, HistoryMeta, HistoryOptions};
+use crate::quote::{Calendar, FundsData, NamedTable, SecFiling, UpgradesDowngrades};
 
 /// Synchronous Yahoo Finance client.
 #[derive(Clone)]
@@ -204,6 +207,88 @@ impl Client {
         block_on(self.inner.earnings_dates(ticker, limit))
     }
 
+    // --- P2: analysis / estimates / funds / shares / valuation / calendar ---
+
+    /// Earnings estimates table.
+    pub fn earnings_estimate(&self, ticker: &str) -> Result<NamedTable> {
+        block_on(self.inner.earnings_estimate(ticker))
+    }
+
+    /// Revenue estimates table.
+    pub fn revenue_estimate(&self, ticker: &str) -> Result<NamedTable> {
+        block_on(self.inner.revenue_estimate(ticker))
+    }
+
+    /// Reported vs estimated EPS history.
+    pub fn earnings_history(&self, ticker: &str) -> Result<NamedTable> {
+        block_on(self.inner.earnings_history(ticker))
+    }
+
+    /// EPS revision trend table.
+    pub fn eps_trend(&self, ticker: &str) -> Result<NamedTable> {
+        block_on(self.inner.eps_trend(ticker))
+    }
+
+    /// EPS revisions table.
+    pub fn eps_revisions(&self, ticker: &str) -> Result<NamedTable> {
+        block_on(self.inner.eps_revisions(ticker))
+    }
+
+    /// Growth estimates table.
+    pub fn growth_estimates(&self, ticker: &str) -> Result<NamedTable> {
+        block_on(self.inner.growth_estimates(ticker))
+    }
+
+    /// Recommendation summary.
+    pub fn recommendations(&self, ticker: &str) -> Result<Vec<crate::quote::RecommendationTrend>> {
+        block_on(self.inner.recommendations(ticker))
+    }
+
+    /// Upgrades / downgrades (rating changes).
+    pub fn upgrades_downgrades(&self, ticker: &str) -> Result<Vec<UpgradesDowngrades>> {
+        block_on(self.inner.upgrades_downgrades(ticker))
+    }
+
+    /// Valuation measures.
+    pub fn valuation_measures(&self, ticker: &str) -> Result<NamedTable> {
+        block_on(self.inner.valuation_measures(ticker))
+    }
+
+    /// Earnings / dividend calendar.
+    pub fn calendar(&self, ticker: &str) -> Result<Calendar> {
+        block_on(self.inner.calendar(ticker))
+    }
+
+    /// SEC filings.
+    pub fn sec_filings(&self, ticker: &str) -> Result<Vec<SecFiling>> {
+        block_on(self.inner.sec_filings(ticker))
+    }
+
+    /// Current shares outstanding.
+    pub fn shares(&self, ticker: &str) -> Result<Option<f64>> {
+        block_on(self.inner.shares(ticker))
+    }
+
+    /// Full share-count time series.
+    pub fn shares_full(
+        &self,
+        ticker: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<Vec<(DateTime<Utc>, f64)>> {
+        block_on(self.inner.shares_full(ticker, start, end))
+    }
+
+    /// Mutual-fund / ETF data.
+    pub fn funds_data(&self, ticker: &str) -> Result<FundsData> {
+        block_on(self.inner.funds_data(ticker))
+    }
+
+    /// Chart metadata.
+    pub fn history_metadata(&self, ticker: &str) -> Result<HistoryMeta> {
+        block_on(self.inner.history_metadata(ticker))
+    }
+
     /// A blocking ticker from a `(symbol, MIC)` pair.
     pub fn ticker_from_mic(&self, symbol: &str, mic: &str) -> Result<Ticker> {
         Ok(Ticker {
@@ -348,5 +433,86 @@ impl Ticker {
     /// Scheduled / reported earnings dates for this ticker, newest first.
     pub fn earnings_dates(&self, limit: usize) -> Result<Vec<crate::earnings::EarningsDate>> {
         block_on(self.inner.earnings_dates(limit))
+    }
+
+    // --- P2: analysis / estimates / funds / shares / valuation / calendar ---
+
+    /// Earnings estimates table.
+    pub fn earnings_estimate(&self) -> Result<NamedTable> {
+        block_on(self.inner.earnings_estimate())
+    }
+
+    /// Revenue estimates table.
+    pub fn revenue_estimate(&self) -> Result<NamedTable> {
+        block_on(self.inner.revenue_estimate())
+    }
+
+    /// Reported vs estimated EPS history.
+    pub fn earnings_history(&self) -> Result<NamedTable> {
+        block_on(self.inner.earnings_history())
+    }
+
+    /// EPS revision trend table.
+    pub fn eps_trend(&self) -> Result<NamedTable> {
+        block_on(self.inner.eps_trend())
+    }
+
+    /// EPS revisions table.
+    pub fn eps_revisions(&self) -> Result<NamedTable> {
+        block_on(self.inner.eps_revisions())
+    }
+
+    /// Growth estimates table.
+    pub fn growth_estimates(&self) -> Result<NamedTable> {
+        block_on(self.inner.growth_estimates())
+    }
+
+    /// Recommendation summary.
+    pub fn recommendations(&self) -> Result<Vec<crate::quote::RecommendationTrend>> {
+        block_on(self.inner.recommendations())
+    }
+
+    /// Upgrades / downgrades (rating changes).
+    pub fn upgrades_downgrades(&self) -> Result<Vec<UpgradesDowngrades>> {
+        block_on(self.inner.upgrades_downgrades())
+    }
+
+    /// Valuation measures.
+    pub fn valuation_measures(&self) -> Result<NamedTable> {
+        block_on(self.inner.valuation_measures())
+    }
+
+    /// Earnings / dividend calendar.
+    pub fn calendar(&self) -> Result<Calendar> {
+        block_on(self.inner.calendar())
+    }
+
+    /// SEC filings.
+    pub fn sec_filings(&self) -> Result<Vec<SecFiling>> {
+        block_on(self.inner.sec_filings())
+    }
+
+    /// Current shares outstanding.
+    pub fn shares(&self) -> Result<Option<f64>> {
+        block_on(self.inner.shares())
+    }
+
+    /// Full share-count time series.
+    pub fn shares_full(
+        &self,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<Vec<(DateTime<Utc>, f64)>> {
+        block_on(self.inner.shares_full(start, end))
+    }
+
+    /// Mutual-fund / ETF data.
+    pub fn funds_data(&self) -> Result<FundsData> {
+        block_on(self.inner.funds_data())
+    }
+
+    /// Chart metadata.
+    pub fn history_metadata(&self) -> Result<HistoryMeta> {
+        block_on(self.inner.history_metadata())
     }
 }

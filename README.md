@@ -15,9 +15,14 @@ Yahoo rate-limiting.
 - **Ticker identifiers** — construct a `Ticker` from a bare symbol, a
   `(symbol, MIC)` pair (e.g. `OR`/`XPAR` → `OR.PA`), or an ISIN
   (`US0378331005` → `AAPL`). ISIN↔ticker resolution mirrors `yfinance`.
-- **Quote / fundamentals / options** — `info`, `fast_info`, holders,
-  sustainability, analyst price targets, recommendation trend, three financial
-  statements, and the option chain.
+- **Quote / fundamentals / options** — `info`, `fast_info`, holders
+  (incl. insider transactions/purchases/roster), sustainability, analyst price
+  targets, recommendation trend, three financial statements, and the option
+  chain.
+- **Analysis & estimates** — earnings/revenue estimates, EPS trend & revisions,
+  growth estimates, recommendations, upgrades/downgrades, valuation measures,
+  earnings/dividend calendar, SEC filings, and current + full share-count series
+  (all paralleling the `Ticker.get_*` surface).
 - **Search / lookup / domain / calendars / screener** — free-text search,
   security lookup, sector/industry/market snapshots, earnings/IPO/economic/split
   calendars, and the screener DSL.
@@ -51,6 +56,33 @@ fn main() -> adaq_data_stock_us::Result<()> {
 
     // Any identifier
     let _ = client.ticker_from_id(TickerId::Symbol("MSFT".into()))?;
+    Ok(())
+}
+```
+
+### Per-ticker analysis
+
+```rust,no_run
+use adaq_data_stock_us::blocking::Ticker;
+use adaq_data_stock_us::Client;
+
+fn main() -> adaq_data_stock_us::Result<()> {
+    let client = Client::new()?;
+    let aapl = client.ticker("AAPL");
+
+    // NamedTable-backed estimates
+    let est = aapl.earnings_estimate()?;
+    println!("rows: {}, cols: {}", est.index.len(), est.columns.len());
+
+    // Rating changes & valuation
+    let _ = aapl.upgrades_downgrades()?;
+    let _ = aapl.valuation_measures()?;
+
+    // SEC filings, calendar, and share counts
+    let _ = aapl.sec_filings()?;
+    let _ = aapl.calendar()?;
+    let shares = aapl.shares()?;
+    println!("shares outstanding: {:?}", shares);
     Ok(())
 }
 ```

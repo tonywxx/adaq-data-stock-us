@@ -67,6 +67,10 @@ pub struct HistoryOptions {
     pub back_adjust: bool,
     /// Keep rows with NaN (otherwise drop).
     pub keepna: bool,
+    /// Repair bad Yahoo data: drop non-positive OHLC bars and make the price
+    /// series split-continuous using declared split events (mirrors yfinance's
+    /// `repair=True`). Off by default to preserve raw behaviour.
+    pub repair: bool,
 }
 
 impl Default for HistoryOptions {
@@ -81,6 +85,7 @@ impl Default for HistoryOptions {
             auto_adjust: true,
             back_adjust: false,
             keepna: false,
+            repair: false,
         }
     }
 }
@@ -231,6 +236,13 @@ impl History {
             });
         }
 
+        // Price-repair: drop non-positive OHLC and make the series split-continuous
+        // using declared split events (mirrors yfinance `repair=True`).
+        if opts.repair {
+            let splits = parse_splits(result);
+            repair_bars(&mut bars, &splits);
+        }
+
         let actions = if opts.actions {
             Some(parse_actions(result))
         } else {
@@ -314,6 +326,39 @@ impl YfSession {
         }
         History::from_chart(ticker, &value, opts)
     }
+
+    /// Fetch just the chart metadata for a ticker (mirrors `get_history_metadata`).
+    pub async fn history_metadata(&self, ticker: &str) -> Result<HistoryMeta> {
+        let urls = Self::urls();
+        let url = format!("{}/v8/finance/chart/{}", urls.query2, ticker);
+        let params = vec![
+            ("interval", "1d".to_string()),
+            ("range", "1d".to_string()),
+            ("events", "div,split,capitalGains".to_string()),
+        ];
+        let value = self.get_json(&url, &params).await?;
+        let err = value
+            .get("chart")
+            .and_then(|c| c.get("error"))
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str());
+        if let Some(desc) = err
+            && !desc.is_empty()
+        {
+            return Err(YfError::TickerMissing(format!("{ticker}: {desc}")));
+        }
+        let result = value
+            .get("chart")
+            .and_then(|c| c.get("result"))
+            .and_then(|r| r.as_array())
+            .and_then(|a| a.first())
+            .ok_or_else(|| YfError::DataMissing("chart.result missing".into()))?;
+        let meta = result
+            .get("meta")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        Ok(parse_meta(&meta))
+    }
 }
 
 // ---- helpers ----
@@ -334,6 +379,69 @@ fn parse_meta(v: &serde_json::Value) -> HistoryMeta {
     }
 }
 
+fn parse_splits(result: &serde_json::Value) -> Vec<Split> {
+    let mut splits = Vec::new();
+    if let Some(split_evts) = result
+        .get("events")
+        .and_then(|e| e.get("split"))
+        .and_then(|d| d.as_object())
+    {
+        for (_k, v) in split_evts {
+            if let (Some(date), Some(num), Some(den)) = (
+                v.get("date").and_then(|x| x.as_i64()),
+                v.get("numerator").and_then(|x| x.as_f64()),
+                v.get("denominator").and_then(|x| x.as_f64()),
+            ) && let Some(dt) = DateTime::from_timestamp(date, 0)
+            {
+                splits.push(Split {
+                    date: dt,
+                    numerator: num,
+                    denominator: den,
+                });
+            }
+        }
+    }
+    splits
+}
+
+/// Drop non-positive OHLC bars and scale pre-split bars by each split factor so
+/// the price series is continuous across splits (mirrors yfinance's
+/// `repair=True` split handling). Scaling pre-split bars by `num/den` and then
+/// re-applying the auto/back-adjust factor yields the same adjusted price, so
+/// this is safe in all adjustment modes.
+fn repair_bars(bars: &mut Vec<Bar>, splits: &[Split]) {
+    bars.retain(|b| {
+        [b.open, b.high, b.low, b.close]
+            .iter()
+            .all(|x| x.map(|v| v > 0.0).unwrap_or(true))
+    });
+    for s in splits {
+        let f = s.numerator / s.denominator;
+        if !f.is_finite() || f <= 0.0 {
+            continue;
+        }
+        for b in bars.iter_mut() {
+            if b.datetime < s.date {
+                if let Some(o) = &mut b.open {
+                    *o *= f;
+                }
+                if let Some(h) = &mut b.high {
+                    *h *= f;
+                }
+                if let Some(l) = &mut b.low {
+                    *l *= f;
+                }
+                if let Some(c) = &mut b.close {
+                    *c *= f;
+                }
+                if let Some(v) = &mut b.volume {
+                    *v /= f;
+                }
+            }
+        }
+    }
+}
+
 fn parse_actions(result: &serde_json::Value) -> Actions {
     let mut actions = Actions::default();
     if let Some(events) = result.get("events") {
@@ -348,22 +456,7 @@ fn parse_actions(result: &serde_json::Value) -> Actions {
                 }
             }
         }
-        if let Some(splits) = events.get("split").and_then(|d| d.as_object()) {
-            for (_k, v) in splits {
-                if let (Some(date), Some(num), Some(den)) = (
-                    v.get("date").and_then(|x| x.as_i64()),
-                    v.get("numerator").and_then(|x| x.as_f64()),
-                    v.get("denominator").and_then(|x| x.as_f64()),
-                ) && let Some(dt) = DateTime::from_timestamp(date, 0)
-                {
-                    actions.splits.push(Split {
-                        date: dt,
-                        numerator: num,
-                        denominator: den,
-                    });
-                }
-            }
-        }
+        actions.splits = parse_splits(result);
         if let Some(cg) = events.get("capitalGains").and_then(|d| d.as_object()) {
             for (_k, v) in cg {
                 if let (Some(date), Some(amount)) = (
@@ -398,5 +491,54 @@ fn ratio(num: Option<f64>, den: Option<f64>) -> Option<f64> {
     match (num, den) {
         (Some(n), Some(d)) if d != 0.0 && n.is_finite() && d.is_finite() => Some(n / d),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bar(dt: DateTime<Utc>, close: f64) -> Bar {
+        Bar {
+            datetime: dt,
+            open: Some(close),
+            high: Some(close),
+            low: Some(close),
+            close: Some(close),
+            adj_close: Some(close),
+            volume: Some(1000.0),
+        }
+    }
+
+    #[test]
+    fn repair_scales_pre_split_bars() {
+        let d0 = DateTime::from_timestamp(1_600_000_000, 0).unwrap();
+        let d1 = DateTime::from_timestamp(1_600_086_400, 0).unwrap(); // +1 day
+        let split = Split {
+            date: d1,
+            numerator: 2.0,
+            denominator: 1.0,
+        };
+        let mut bars = vec![bar(d0, 100.0), bar(d1, 50.0)];
+        repair_bars(&mut bars, &[split]);
+        // Pre-split bar scaled up by 2 (price drops 2x after split).
+        assert_eq!(bars[0].close, Some(200.0));
+        assert_eq!(bars[1].close, Some(50.0));
+    }
+
+    #[test]
+    fn repair_drops_nonpositive_bars() {
+        let d0 = DateTime::from_timestamp(1_600_000_000, 0).unwrap();
+        let d1 = DateTime::from_timestamp(1_600_086_400, 0).unwrap();
+        let mut bars = vec![
+            bar(d0, 100.0),
+            Bar {
+                close: Some(0.0),
+                ..bar(d1, 0.0)
+            },
+        ];
+        repair_bars(&mut bars, &[]);
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].close, Some(100.0));
     }
 }

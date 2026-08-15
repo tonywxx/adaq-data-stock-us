@@ -3,14 +3,17 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
+
 use crate::config::Config;
 use crate::earnings::EarningsDate;
 use crate::error::{Result, YfError};
-use crate::history::{History, HistoryOptions};
+use crate::history::{History, HistoryMeta, HistoryOptions};
 use crate::http::YfSession;
 use crate::isin::{isin_for_ticker, resolve_isin};
 use crate::mic::{is_isin, resolve_symbol};
 use crate::news::NewsArticle;
+use crate::quote::{Calendar, FundsData, NamedTable, SecFiling, UpgradesDowngrades};
 
 /// Async Yahoo Finance client. Cheap to clone (shares one session + cache).
 #[derive(Clone)]
@@ -211,6 +214,91 @@ impl Client {
         self.session.earnings_dates(ticker, limit).await
     }
 
+    // --- P2: analysis / estimates / funds / shares / valuation / calendar ---
+
+    /// Earnings estimates table (mirrors `Ticker.get_earnings_estimate`).
+    pub async fn earnings_estimate(&self, ticker: &str) -> Result<NamedTable> {
+        self.session.earnings_estimate(ticker).await
+    }
+
+    /// Revenue estimates table (mirrors `Ticker.get_revenue_estimate`).
+    pub async fn revenue_estimate(&self, ticker: &str) -> Result<NamedTable> {
+        self.session.revenue_estimate(ticker).await
+    }
+
+    /// Reported vs estimated EPS history (mirrors `Ticker.get_earnings_history`).
+    pub async fn earnings_history(&self, ticker: &str) -> Result<NamedTable> {
+        self.session.earnings_history(ticker).await
+    }
+
+    /// EPS revision trend table (mirrors `Ticker.get_eps_trend`).
+    pub async fn eps_trend(&self, ticker: &str) -> Result<NamedTable> {
+        self.session.eps_trend(ticker).await
+    }
+
+    /// EPS revisions table (mirrors `Ticker.get_eps_revisions`).
+    pub async fn eps_revisions(&self, ticker: &str) -> Result<NamedTable> {
+        self.session.eps_revisions(ticker).await
+    }
+
+    /// Growth estimates table (mirrors `Ticker.get_growth_estimates`).
+    pub async fn growth_estimates(&self, ticker: &str) -> Result<NamedTable> {
+        self.session.growth_estimates(ticker).await
+    }
+
+    /// Recommendation summary (mirrors `Ticker.get_recommendations`).
+    pub async fn recommendations(
+        &self,
+        ticker: &str,
+    ) -> Result<Vec<crate::quote::RecommendationTrend>> {
+        self.session.recommendations(ticker).await
+    }
+
+    /// Upgrades / downgrades (rating changes, mirrors `Ticker.get_upgrades_downgrades`).
+    pub async fn upgrades_downgrades(&self, ticker: &str) -> Result<Vec<UpgradesDowngrades>> {
+        self.session.upgrades_downgrades(ticker).await
+    }
+
+    /// Valuation measures (mirrors `Ticker.get_valuation_measures`).
+    pub async fn valuation_measures(&self, ticker: &str) -> Result<NamedTable> {
+        self.session.valuation_measures(ticker).await
+    }
+
+    /// Earnings / dividend calendar (mirrors `Ticker.get_calendar`).
+    pub async fn calendar(&self, ticker: &str) -> Result<Calendar> {
+        self.session.ticker_calendar(ticker).await
+    }
+
+    /// SEC filings (mirrors `Ticker.get_sec_filings`).
+    pub async fn sec_filings(&self, ticker: &str) -> Result<Vec<SecFiling>> {
+        self.session.sec_filings(ticker).await
+    }
+
+    /// Current shares outstanding (mirrors `Ticker.get_shares`).
+    pub async fn shares(&self, ticker: &str) -> Result<Option<f64>> {
+        self.session.shares(ticker).await
+    }
+
+    /// Full share-count time series (mirrors `Ticker.get_shares_full`).
+    pub async fn shares_full(
+        &self,
+        ticker: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<Vec<(DateTime<Utc>, f64)>> {
+        self.session.shares_full(ticker, start, end).await
+    }
+
+    /// Mutual-fund / ETF data (mirrors `Ticker.get_funds_data`).
+    pub async fn funds_data(&self, ticker: &str) -> Result<FundsData> {
+        self.session.funds_data(ticker).await
+    }
+
+    /// Chart metadata (mirrors `Ticker.get_history_metadata`).
+    pub async fn history_metadata(&self, ticker: &str) -> Result<HistoryMeta> {
+        self.session.history_metadata(ticker).await
+    }
+
     // --- P4: auth / live ---
 
     /// An auth/entitlement helper bound to this client's session.
@@ -389,6 +477,87 @@ impl Ticker {
     /// (mirrors `Ticker.get_earnings_dates`).
     pub async fn earnings_dates(&self, limit: usize) -> Result<Vec<EarningsDate>> {
         self.client.earnings_dates(&self.symbol, limit).await
+    }
+
+    // --- P2: analysis / estimates / funds / shares / valuation / calendar ---
+
+    /// Earnings estimates table (mirrors `Ticker.get_earnings_estimate`).
+    pub async fn earnings_estimate(&self) -> Result<NamedTable> {
+        self.client.earnings_estimate(&self.symbol).await
+    }
+
+    /// Revenue estimates table (mirrors `Ticker.get_revenue_estimate`).
+    pub async fn revenue_estimate(&self) -> Result<NamedTable> {
+        self.client.revenue_estimate(&self.symbol).await
+    }
+
+    /// Reported vs estimated EPS history (mirrors `Ticker.get_earnings_history`).
+    pub async fn earnings_history(&self) -> Result<NamedTable> {
+        self.client.earnings_history(&self.symbol).await
+    }
+
+    /// EPS revision trend table (mirrors `Ticker.get_eps_trend`).
+    pub async fn eps_trend(&self) -> Result<NamedTable> {
+        self.client.eps_trend(&self.symbol).await
+    }
+
+    /// EPS revisions table (mirrors `Ticker.get_eps_revisions`).
+    pub async fn eps_revisions(&self) -> Result<NamedTable> {
+        self.client.eps_revisions(&self.symbol).await
+    }
+
+    /// Growth estimates table (mirrors `Ticker.get_growth_estimates`).
+    pub async fn growth_estimates(&self) -> Result<NamedTable> {
+        self.client.growth_estimates(&self.symbol).await
+    }
+
+    /// Recommendation summary (mirrors `Ticker.get_recommendations`).
+    pub async fn recommendations(&self) -> Result<Vec<crate::quote::RecommendationTrend>> {
+        self.client.recommendations(&self.symbol).await
+    }
+
+    /// Upgrades / downgrades (rating changes, mirrors `Ticker.get_upgrades_downgrades`).
+    pub async fn upgrades_downgrades(&self) -> Result<Vec<UpgradesDowngrades>> {
+        self.client.upgrades_downgrades(&self.symbol).await
+    }
+
+    /// Valuation measures (mirrors `Ticker.get_valuation_measures`).
+    pub async fn valuation_measures(&self) -> Result<NamedTable> {
+        self.client.valuation_measures(&self.symbol).await
+    }
+
+    /// Earnings / dividend calendar (mirrors `Ticker.get_calendar`).
+    pub async fn calendar(&self) -> Result<Calendar> {
+        self.client.calendar(&self.symbol).await
+    }
+
+    /// SEC filings (mirrors `Ticker.get_sec_filings`).
+    pub async fn sec_filings(&self) -> Result<Vec<SecFiling>> {
+        self.client.sec_filings(&self.symbol).await
+    }
+
+    /// Current shares outstanding (mirrors `Ticker.get_shares`).
+    pub async fn shares(&self) -> Result<Option<f64>> {
+        self.client.shares(&self.symbol).await
+    }
+
+    /// Full share-count time series (mirrors `Ticker.get_shares_full`).
+    pub async fn shares_full(
+        &self,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<Vec<(DateTime<Utc>, f64)>> {
+        self.client.shares_full(&self.symbol, start, end).await
+    }
+
+    /// Mutual-fund / ETF data (mirrors `Ticker.get_funds_data`).
+    pub async fn funds_data(&self) -> Result<FundsData> {
+        self.client.funds_data(&self.symbol).await
+    }
+
+    /// Chart metadata (mirrors `Ticker.get_history_metadata`).
+    pub async fn history_metadata(&self) -> Result<HistoryMeta> {
+        self.client.history_metadata(&self.symbol).await
     }
 }
 
