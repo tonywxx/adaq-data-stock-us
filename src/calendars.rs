@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::error::{Result, YfError};
 use crate::http::YfSession;
+use crate::json::yf_result_first;
 
 const VIZ_URL: &str = "https://query1.finance.yahoo.com/v1/finance/visualization";
 
@@ -244,12 +245,9 @@ fn zip_fields(row: &[Value], fields: &[&str]) -> HashMap<String, Value> {
 }
 
 fn parse_documents(cal_type: &str, v: &Value) -> Result<CalendarResult> {
-    let doc = v
-        .get("finance")
-        .and_then(|f| f.get("result"))
-        .and_then(|r| r.as_array())
-        .and_then(|a| a.first())
-        .and_then(|r| r.get("documents"))
+    let doc = yf_result_first(v, "finance")
+        .map_err(|_| YfError::DataMissing(format!("calendar {cal_type}")))?
+        .get("documents")
         .and_then(|d| d.as_array())
         .and_then(|a| a.first())
         .ok_or_else(|| YfError::DataMissing(format!("calendar {cal_type}")))?;

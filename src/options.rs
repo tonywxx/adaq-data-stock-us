@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, YfError};
 use crate::http::YfSession;
+use crate::json::{get, get_f64, get_str, yf_result_first};
 
 /// A single option contract (call or put).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -53,12 +54,8 @@ impl YfSession {
         let urls = YfSession::urls();
         let url = format!("{}/v7/finance/options/{}", urls.query2, ticker);
         let value = self.get_json(&url, &[]).await?;
-        let result = value
-            .get("optionChain")
-            .and_then(|c| c.get("result"))
-            .and_then(|r| r.as_array())
-            .and_then(|a| a.first())
-            .ok_or_else(|| YfError::DataMissing(format!("optionChain.result for {ticker}")))?;
+        let result = yf_result_first(&value, "optionChain")
+            .map_err(|_| YfError::DataMissing(format!("optionChain.result for {ticker}")))?;
 
         let expirations = result
             .get("expirationDates")
@@ -118,11 +115,10 @@ impl YfSession {
 }
 
 fn parse_contract(v: &serde_json::Value) -> Option<OptionContract> {
-    let f = |p: &str| v.get(p).and_then(|x| x.as_f64());
-    let s = |p: &str| v.get(p).and_then(|x| x.as_str()).map(String::from);
-    let b = |p: &str| v.get(p).and_then(|x| x.as_bool());
-    let trade = v
-        .get("lastTradeDate")
+    let f = |p: &str| get_f64(v, &[p]);
+    let s = |p: &str| get_str(v, &[p]);
+    let b = |p: &str| get(v, &[p]).and_then(|x| x.as_bool());
+    let trade = get(v, &["lastTradeDate"])
         .and_then(|x| x.as_i64())
         .and_then(|sec| chrono::DateTime::from_timestamp(sec, 0))
         .map(|dt| dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string());

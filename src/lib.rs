@@ -32,6 +32,7 @@ pub mod fundamentals;
 pub mod history;
 pub mod http;
 pub mod isin;
+pub mod json;
 pub mod live;
 pub mod lookup;
 pub mod mic;

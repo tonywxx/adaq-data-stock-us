@@ -51,13 +51,9 @@ pub async fn quote_summary(session: &YfSession, ticker: &str, modules: &[&str]) 
     let url = format!("{}/v10/finance/quoteSummary/{}", urls.query2, ticker);
     let params = vec![("modules", modules.join(","))];
     let value = session.get_json(&url, &params).await?;
-    value
-        .get("quoteSummary")
-        .and_then(|q| q.get("result"))
-        .and_then(|r| r.as_array())
-        .and_then(|a| a.first())
+    crate::json::yf_result_first(&value, "quoteSummary")
+        .map_err(|_| YfError::DataMissing(format!("quoteSummary.result for {ticker}")))
         .cloned()
-        .ok_or_else(|| YfError::DataMissing(format!("quoteSummary.result for {ticker}")))
 }
 
 /// A flattened security information blob. Common fields are extracted; the full
@@ -88,7 +84,7 @@ pub struct Info {
 
 impl Info {
     fn from_result(ticker: &str, result: &Value) -> Info {
-        let get = |path: &[&str]| dig(result, path);
+        let get = |path: &[&str]| crate::json::get(result, path);
         let f = |path: &[&str]| get(path).and_then(|v| v.as_f64());
         Info {
             symbol: get(&["price", "symbol"]).and_then(|v| v.as_str().map(String::from)),
@@ -148,7 +144,7 @@ pub struct FastInfo {
 
 impl FastInfo {
     fn from_result(result: &Value) -> FastInfo {
-        let get = |path: &[&str]| dig(result, path);
+        let get = |path: &[&str]| crate::json::get(result, path);
         let f = |path: &[&str]| get(path).and_then(|v| v.as_f64());
         FastInfo {
             currency: get(&["price", "currency"]).and_then(|v| v.as_str().map(String::from)),
@@ -277,8 +273,8 @@ impl YfSession {
     /// Sustainability / ESG.
     pub async fn sustainability(&self, ticker: &str) -> Result<Sustainability> {
         let result = quote_summary(self, ticker, &["esgScores"]).await?;
-        let esg = dig(&result, &["esgScores"]).unwrap_or(&Value::Null);
-        let f = |p: &[&str]| dig(esg, p).and_then(|v| v.as_f64());
+        let esg = crate::json::get(&result, &["esgScores"]).unwrap_or(&Value::Null);
+        let f = |p: &[&str]| crate::json::get(esg, p).and_then(|v| v.as_f64());
         Ok(Sustainability {
             esg_score: f(&["esgScore"]),
             environment_score: f(&["environmentScore"]),
@@ -293,28 +289,32 @@ impl YfSession {
     /// Analyst price targets.
     pub async fn analyst_price_targets(&self, ticker: &str) -> Result<AnalystPriceTargets> {
         let result = quote_summary(self, ticker, &["financialData", "price"]).await?;
-        let fd = dig(&result, &["financialData"]).unwrap_or(&Value::Null);
-        let f = |p: &[&str]| dig(fd, p).and_then(|v| v.as_f64());
+        let fd = crate::json::get(&result, &["financialData"]).unwrap_or(&Value::Null);
+        let f = |p: &[&str]| crate::json::get(fd, p).and_then(|v| v.as_f64());
         Ok(AnalystPriceTargets {
             current: f(&["currentPrice", "raw"]),
             low: f(&["targetLowPrice", "raw"]),
             high: f(&["targetHighPrice", "raw"]),
             mean: f(&["targetMeanPrice", "raw"]),
             median: f(&["targetMedianPrice", "raw"]),
-            num_analysts: dig(fd, &["numberOfAnalystOpinions", "raw"]).and_then(|v| v.as_f64()),
+            num_analysts: crate::json::get(fd, &["numberOfAnalystOpinions", "raw"])
+                .and_then(|v| v.as_f64()),
         })
     }
 
     /// Recommendation trend history.
     pub async fn recommendation_trend(&self, ticker: &str) -> Result<Vec<RecommendationTrend>> {
         let result = quote_summary(self, ticker, &["recommendationTrend"]).await?;
-        let arr = dig(&result, &["recommendationTrend", "trend"]).and_then(|v| v.as_array());
+        let arr =
+            crate::json::get(&result, &["recommendationTrend", "trend"]).and_then(|v| v.as_array());
         Ok(arr
             .map(|a| {
                 a.iter()
                     .map(|v| {
-                        let i = |p: &[&str]| dig(v, p).and_then(|x| x.as_i64());
-                        let s = |p: &[&str]| dig(v, p).and_then(|x| x.as_str().map(String::from));
+                        let i = |p: &[&str]| crate::json::get(v, p).and_then(|x| x.as_i64());
+                        let s = |p: &[&str]| {
+                            crate::json::get(v, p).and_then(|x| x.as_str().map(String::from))
+                        };
                         RecommendationTrend {
                             period: s(&["period"]),
                             strong_buy: i(&["strongBuy"]),
@@ -361,20 +361,20 @@ fn parse_named_table(
     label_key: &str,
     metrics: &[&str],
 ) -> NamedTable {
-    let arr = dig(result, &[module, array_key])
+    let arr = crate::json::get(result, &[module, array_key])
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
     let mut index = Vec::with_capacity(arr.len());
     let mut values = Vec::with_capacity(arr.len());
     for obj in &arr {
-        let label = dig(obj, &[label_key])
+        let label = crate::json::get(obj, &[label_key])
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
         let row: Vec<Option<f64>> = metrics
             .iter()
-            .map(|m| dig(obj, &[m]).and_then(|v| v.as_f64()))
+            .map(|m| crate::json::get(obj, &[m]).and_then(|v| v.as_f64()))
             .collect();
         index.push(label);
         values.push(row);
@@ -506,22 +506,24 @@ impl YfSession {
     /// Upgrades / downgrades (rating changes), mirrors `get_upgrades_downgrades`.
     pub async fn upgrades_downgrades(&self, ticker: &str) -> Result<Vec<UpgradesDowngrades>> {
         let r = quote_summary(self, ticker, &["upgradeDowngradeHistory"]).await?;
-        let arr = dig(&r, &["upgradeDowngradeHistory", "history"])
+        let arr = crate::json::get(&r, &["upgradeDowngradeHistory", "history"])
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
         Ok(arr
             .iter()
             .map(|o| UpgradesDowngrades {
-                date: ts_to_date(dig(o, &["date", "raw"]).and_then(|v| v.as_f64())),
-                firm: dig(o, &["firm"]).and_then(|v| v.as_str()).map(String::from),
-                to_grade: dig(o, &["toGrade"])
+                date: ts_to_date(crate::json::get(o, &["date", "raw"]).and_then(|v| v.as_f64())),
+                firm: crate::json::get(o, &["firm"])
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                from_grade: dig(o, &["fromGrade"])
+                to_grade: crate::json::get(o, &["toGrade"])
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                action: dig(o, &["action"])
+                from_grade: crate::json::get(o, &["fromGrade"])
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                action: crate::json::get(o, &["action"])
                     .and_then(|v| v.as_str())
                     .map(String::from),
             })
@@ -582,11 +584,8 @@ impl YfSession {
             ("period2", end.timestamp().to_string()),
         ];
         let v = self.get_json(&url, &params).await?;
-        let series = v
-            .get("timeseries")
-            .and_then(|t| t.get("result"))
-            .and_then(|r| r.as_array())
-            .and_then(|a| a.first())
+        let series = crate::json::yf_result_first(&v, "timeseries")
+            .ok()
             .and_then(|r| r.get("shares_out"))
             .and_then(|s| s.as_array())
             .cloned()
@@ -614,41 +613,39 @@ impl YfSession {
             "fundPerformance",
         ];
         let r = quote_summary(self, ticker, &modules).await?;
-        let fp = dig(&r, &["fundProfile"]).unwrap_or(&Value::Null);
-        let th = dig(&r, &["topHoldings"]).unwrap_or(&Value::Null);
-        let f = |p: &[&str]| dig(&r, p).and_then(|v| v.as_f64());
-        let fs = |p: &[&str]| dig(&r, p).and_then(|v| v.as_str()).map(String::from);
-        let sector_weightings = dig(fp, &["sectorWeightings"])
+        let fp = crate::json::get(&r, &["fundProfile"]).unwrap_or(&Value::Null);
+        let th = crate::json::get(&r, &["topHoldings"]).unwrap_or(&Value::Null);
+        let f = |p: &[&str]| crate::json::get(&r, p).and_then(|v| v.as_f64());
+        let fs = |p: &[&str]| {
+            crate::json::get(&r, p)
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        };
+        let sector_weightings = crate::json::get(fp, &["sectorWeightings"])
             .and_then(|v| v.as_array())
             .map(|a| {
                 a.iter()
                     .filter_map(|s| {
                         let (sector, weight) = s.as_object()?.iter().next()?;
-                        Some((
-                            sector.clone(),
-                            weight
-                                .get("raw")
-                                .and_then(|x| x.as_f64())
-                                .or_else(|| weight.as_f64()),
-                        ))
+                        Some((sector.clone(), crate::json::get_f64(weight, &[])))
                     })
                     .collect()
             })
             .unwrap_or_default();
-        let top_holdings = dig(th, &["holdings"])
+        let top_holdings = crate::json::get(th, &["holdings"])
             .and_then(|v| v.as_array())
             .map(|a| {
                 a.iter()
                     .map(|h| FundHolding {
-                        symbol: dig(h, &["symbol"])
+                        symbol: crate::json::get(h, &["symbol"])
                             .and_then(|x| x.as_str())
                             .map(String::from),
-                        name: dig(h, &["holdingName"])
+                        name: crate::json::get(h, &["holdingName"])
                             .and_then(|x| x.as_str())
                             .map(String::from),
-                        holding_percent: dig(h, &["holdingPercent", "raw"])
+                        holding_percent: crate::json::get(h, &["holdingPercent", "raw"])
                             .and_then(|x| x.as_f64()),
-                        value: dig(h, &["value", "raw"]).and_then(|x| x.as_f64()),
+                        value: crate::json::get(h, &["value", "raw"]).and_then(|x| x.as_f64()),
                     })
                     .collect()
             })
@@ -722,19 +719,22 @@ pub struct FundHolding {
 }
 
 fn parse_calendar_events(result: &Value) -> Calendar {
-    let ce = dig(result, &["calendarEvents"]).unwrap_or(&Value::Null);
-    let earnings = dig(ce, &["earnings"]).unwrap_or(&Value::Null);
-    let dt = |p: &[&str]| ts_to_date(dig(ce, p).and_then(|v| v.as_f64()));
+    let ce = crate::json::get(result, &["calendarEvents"]).unwrap_or(&Value::Null);
+    let earnings = crate::json::get(ce, &["earnings"]).unwrap_or(&Value::Null);
+    let dt = |p: &[&str]| ts_to_date(crate::json::get(ce, p).and_then(|v| v.as_f64()));
     Calendar {
         earnings_date: dt(&["earnings", "earningsDate", "raw"]).or_else(|| {
-            ts_to_date(dig(earnings, &["earningsDate", "raw"]).and_then(|v| v.as_f64()))
+            ts_to_date(
+                crate::json::get(earnings, &["earningsDate", "raw"]).and_then(|v| v.as_f64()),
+            )
         }),
-        earnings_time: dig(ce, &["earnings", "earningsTime"])
+        earnings_time: crate::json::get(ce, &["earnings", "earningsTime"])
             .and_then(|v| v.as_str())
-            .or_else(|| dig(earnings, &["earningsTime"]).and_then(|v| v.as_str()))
+            .or_else(|| crate::json::get(earnings, &["earningsTime"]).and_then(|v| v.as_str()))
             .map(String::from),
-        eps_estimate: dig(earnings, &["epsEstimate", "raw"]).and_then(|v| v.as_f64()),
-        revenue_estimate: dig(earnings, &["revenueEstimate", "raw"]).and_then(|v| v.as_f64()),
+        eps_estimate: crate::json::get(earnings, &["epsEstimate", "raw"]).and_then(|v| v.as_f64()),
+        revenue_estimate: crate::json::get(earnings, &["revenueEstimate", "raw"])
+            .and_then(|v| v.as_f64()),
         ex_dividend_date: dt(&["exDividendDate", "raw"]),
         dividend_date: dt(&["dividendDate", "raw"]),
         previous_fiscal_year_end: dt(&["previousFiscalYearEnd", "raw"]),
@@ -745,14 +745,14 @@ fn parse_calendar_events(result: &Value) -> Calendar {
 }
 
 fn parse_sec_filings(result: &Value) -> Vec<SecFiling> {
-    let arr = dig(result, &["secFilings", "filings"])
+    let arr = crate::json::get(result, &["secFilings", "filings"])
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
     arr.iter()
         .map(|o| {
             // secFilings dates are date strings ("YYYY-MM-DD"), not epoch seconds.
-            let date = dig(o, &["date", "raw"])
+            let date = crate::json::get(o, &["date", "raw"])
                 .and_then(|v| v.as_str())
                 .and_then(|s| {
                     NaiveDate::parse_from_str(s, "%Y-%m-%d")
@@ -762,12 +762,16 @@ fn parse_sec_filings(result: &Value) -> Vec<SecFiling> {
                 });
             SecFiling {
                 date,
-                type_: dig(o, &["type"]).and_then(|v| v.as_str()).map(String::from),
-                title: dig(o, &["title"])
+                type_: crate::json::get(o, &["type"])
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                url: dig(o, &["url"]).and_then(|v| v.as_str()).map(String::from),
-                editor: dig(o, &["editor"])
+                title: crate::json::get(o, &["title"])
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                url: crate::json::get(o, &["url"])
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                editor: crate::json::get(o, &["editor"])
                     .and_then(|v| v.as_str())
                     .map(String::from),
             }
@@ -779,31 +783,34 @@ fn parse_valuation_measures(result: &Value) -> NamedTable {
     let measures = [
         (
             "Market Cap",
-            dig(result, &["price", "marketCap"]).and_then(|v| v.as_f64()),
+            crate::json::get(result, &["price", "marketCap"]).and_then(|v| v.as_f64()),
         ),
         (
             "Enterprise Value",
-            dig(result, &["defaultKeyStatistics", "enterpriseValue"]).and_then(|v| v.as_f64()),
+            crate::json::get(result, &["defaultKeyStatistics", "enterpriseValue"])
+                .and_then(|v| v.as_f64()),
         ),
         (
             "Trailing P/E",
-            dig(result, &["summaryDetail", "trailingPE"]).and_then(|v| v.as_f64()),
+            crate::json::get(result, &["summaryDetail", "trailingPE"]).and_then(|v| v.as_f64()),
         ),
         (
             "Forward P/E",
-            dig(result, &["summaryDetail", "forwardPE"]).and_then(|v| v.as_f64()),
+            crate::json::get(result, &["summaryDetail", "forwardPE"]).and_then(|v| v.as_f64()),
         ),
         (
             "PEG Ratio",
-            dig(result, &["defaultKeyStatistics", "pegRatio"]).and_then(|v| v.as_f64()),
+            crate::json::get(result, &["defaultKeyStatistics", "pegRatio"])
+                .and_then(|v| v.as_f64()),
         ),
         (
             "Price/Book",
-            dig(result, &["defaultKeyStatistics", "priceToBook"]).and_then(|v| v.as_f64()),
+            crate::json::get(result, &["defaultKeyStatistics", "priceToBook"])
+                .and_then(|v| v.as_f64()),
         ),
         (
             "Enterprise Value/Revenue",
-            dig(
+            crate::json::get(
                 result,
                 &["defaultKeyStatistics", "enterpriseValueToRevenue"],
             )
@@ -811,7 +818,7 @@ fn parse_valuation_measures(result: &Value) -> NamedTable {
         ),
         (
             "Enterprise Value/EBITDA",
-            dig(result, &["defaultKeyStatistics", "enterpriseValueToEbitda"])
+            crate::json::get(result, &["defaultKeyStatistics", "enterpriseValueToEbitda"])
                 .and_then(|v| v.as_f64()),
         ),
     ];
@@ -825,16 +832,19 @@ fn parse_valuation_measures(result: &Value) -> NamedTable {
 }
 
 fn parse_holder_table(result: &Value, path: &[&str]) -> Vec<HolderRow> {
-    dig(result, path)
+    crate::json::get(result, path)
         .and_then(|v| v.as_array())
         .map(|a| {
             a.iter()
                 .map(|v| HolderRow {
-                    name: dig(v, &["name"]).and_then(|x| x.as_str().map(String::from)),
-                    pct_in_floats: dig(v, &["pctHeld", "raw"]).and_then(|x| x.as_f64()),
-                    position: dig(v, &["positionDirect", "raw"]).and_then(|x| x.as_f64()),
-                    value: dig(v, &["value", "raw"]).and_then(|x| x.as_f64()),
-                    date: dig(v, &["reportDate"]).and_then(|x| x.as_str().map(String::from)),
+                    name: crate::json::get(v, &["name"]).and_then(|x| x.as_str().map(String::from)),
+                    pct_in_floats: crate::json::get(v, &["pctHeld", "raw"])
+                        .and_then(|x| x.as_f64()),
+                    position: crate::json::get(v, &["positionDirect", "raw"])
+                        .and_then(|x| x.as_f64()),
+                    value: crate::json::get(v, &["value", "raw"]).and_then(|x| x.as_f64()),
+                    date: crate::json::get(v, &["reportDate"])
+                        .and_then(|x| x.as_str().map(String::from)),
                 })
                 .collect()
         })
@@ -844,17 +854,6 @@ fn parse_holder_table(result: &Value, path: &[&str]) -> Vec<HolderRow> {
 /// Dig a nested JSON path, tolerating missing nodes. At the leaf, unwrap
 /// yfinance's `{"raw": x, "fmt": ".."}` numeric wrapper. Explicit `raw` path
 /// segments still resolve correctly (they already land on the raw value).
-fn dig<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    let mut cur = v;
-    for p in path {
-        cur = cur.get(p)?;
-    }
-    if let Some(raw) = cur.get("raw") {
-        return Some(raw);
-    }
-    Some(cur)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

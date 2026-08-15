@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::http::YfSession;
+use crate::json::yf_result_first;
 
 /// A single scheduled / reported earnings date for a ticker.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -50,12 +51,11 @@ impl YfSession {
             ],
         });
         let v = self.post_json(&url, &params, &body).await?;
-        let doc = v
-            .get("finance")
-            .and_then(|f| f.get("result"))
-            .and_then(|r| r.as_array())
-            .and_then(|a| a.first())
-            .and_then(|r| r.get("documents"))
+        let doc = yf_result_first(&v, "finance")
+            .map_err(|_| {
+                crate::error::YfError::DataMissing(format!("earnings dates missing for {ticker}"))
+            })?
+            .get("documents")
             .and_then(|d| d.as_array())
             .and_then(|a| a.first())
             .ok_or_else(|| {

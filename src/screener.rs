@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 
 use crate::error::{Result, YfError};
 use crate::http::YfSession;
+use crate::json::{get_f64, get_u64, yf_result_first};
 
 const SCREENER_URL: &str = "https://query1.finance.yahoo.com/v1/finance/screener";
 const PREDEFINED_URL: &str =
@@ -345,21 +346,6 @@ pub struct ScreenerResult {
     pub raw: Value,
 }
 
-fn dig_f64(v: &Value, path: &[&str]) -> Option<f64> {
-    let mut cur = v;
-    for p in path {
-        cur = cur.get(p)?;
-    }
-    // Yahoo returns either a plain number or a `{ "raw": <num>, "fmt": ... }`.
-    if let Some(n) = cur.as_f64() {
-        return Some(n);
-    }
-    if let Some(raw) = cur.get("raw") {
-        return raw.as_f64();
-    }
-    None
-}
-
 fn parse_quote(q: &Value) -> ScreenerQuote {
     ScreenerQuote {
         symbol: q.get("symbol").and_then(|x| x.as_str()).map(String::from),
@@ -378,25 +364,17 @@ fn parse_quote(q: &Value) -> ScreenerQuote {
             .get("quoteType")
             .and_then(|x| x.as_str())
             .map(String::from),
-        price: dig_f64(q, &["regularMarketPrice"]),
-        market_cap: dig_f64(q, &["marketCap"]),
-        percent_change: dig_f64(q, &["regularMarketChangePercent"]),
-        volume: q
-            .get("regularMarketVolume")
-            .and_then(|x| x.get("raw"))
-            .and_then(|x| x.as_u64())
-            .or_else(|| q.get("regularMarketVolume").and_then(|x| x.as_u64())),
+        price: get_f64(q, &["regularMarketPrice"]),
+        market_cap: get_f64(q, &["marketCap"]),
+        percent_change: get_f64(q, &["regularMarketChangePercent"]),
+        volume: get_u64(q, &["regularMarketVolume"]),
         raw: q.clone(),
     }
 }
 
 fn parse_result(v: &Value) -> Result<ScreenerResult> {
-    let r = v
-        .get("finance")
-        .and_then(|f| f.get("result"))
-        .and_then(|r| r.as_array())
-        .and_then(|a| a.first())
-        .ok_or_else(|| YfError::DataMissing("screener result".to_string()))?;
+    let r = yf_result_first(v, "finance")
+        .map_err(|_| YfError::DataMissing("screener result".to_string()))?;
     let total = r.get("total").and_then(|t| t.as_u64());
     let quotes = r
         .get("quotes")

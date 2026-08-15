@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, YfError};
 use crate::http::YfSession;
+use crate::json::{get_f64, get_str, yf_result};
 
 /// Market region for [`Market`]. Mirrors yfinance's `MarketRegion`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -87,10 +88,6 @@ pub struct Market {
     pub summary: Vec<MarketSummaryRow>,
 }
 
-fn finance_result(v: &serde_json::Value) -> Option<&serde_json::Value> {
-    v.get("finance").and_then(|f| f.get("result"))
-}
-
 fn companies_from(v: &serde_json::Value) -> Vec<Company> {
     v.get("companies")
         .and_then(|c| c.as_array())
@@ -107,12 +104,13 @@ impl YfSession {
     pub async fn sector(&self, key: &str) -> Result<Sector> {
         let url = format!("{}/v1/finance/sectors/{}", Self::urls().query1, key);
         let v = self.get_json(&url, &[]).await?;
-        let r = finance_result(&v).ok_or_else(|| YfError::DataMissing(format!("sector {key}")))?;
+        let r =
+            yf_result(&v, "finance").map_err(|_| YfError::DataMissing(format!("sector {key}")))?;
         Ok(Sector {
-            name: dig_str(r, &["name"]),
-            symbol: dig_str(r, &["symbol"]),
-            ticker: dig_str(r, &["ticker"]),
-            overview: dig_str(r, &["description"]),
+            name: get_str(r, &["name"]),
+            symbol: get_str(r, &["symbol"]),
+            ticker: get_str(r, &["ticker"]),
+            overview: get_str(r, &["description"]),
             top_companies: r
                 .get("topCompanies")
                 .map(companies_from)
@@ -124,15 +122,15 @@ impl YfSession {
     pub async fn industry(&self, key: &str) -> Result<Industry> {
         let url = format!("{}/v1/finance/industries/{}", Self::urls().query1, key);
         let v = self.get_json(&url, &[]).await?;
-        let r =
-            finance_result(&v).ok_or_else(|| YfError::DataMissing(format!("industry {key}")))?;
+        let r = yf_result(&v, "finance")
+            .map_err(|_| YfError::DataMissing(format!("industry {key}")))?;
         Ok(Industry {
-            name: dig_str(r, &["name"]),
-            symbol: dig_str(r, &["symbol"]),
-            ticker: dig_str(r, &["ticker"]),
-            sector_key: dig_str(r, &["sectorKey"]),
-            sector_name: dig_str(r, &["sectorName"]),
-            overview: dig_str(r, &["description"]),
+            name: get_str(r, &["name"]),
+            symbol: get_str(r, &["symbol"]),
+            ticker: get_str(r, &["ticker"]),
+            sector_key: get_str(r, &["sectorKey"]),
+            sector_name: get_str(r, &["sectorName"]),
+            overview: get_str(r, &["description"]),
             top_companies: r
                 .get("topCompanies")
                 .map(companies_from)
@@ -156,20 +154,19 @@ impl YfSession {
         let params = vec![("region", region.as_str().to_string())];
 
         let v = self.get_json(&summary_url, &params).await?;
-        let summary = v
-            .get("marketSummaryResponse")
-            .and_then(|m| m.get("result"))
+        let summary = yf_result(&v, "marketSummaryResponse")
+            .ok()
             .and_then(|r| r.as_array())
             .map(|a| {
                 a.iter()
                     .map(|row| MarketSummaryRow {
-                        exchange: dig_str(row, &["exchange"]),
-                        short_name: dig_str(row, &["shortName"]),
-                        region: dig_str(row, &["region"]),
-                        price: dig_f64(row, &["regularMarketPrice", "raw"])
-                            .or_else(|| dig_f64(row, &["price", "raw"])),
-                        change: dig_f64(row, &["regularMarketChange", "raw"]),
-                        percent_change: dig_f64(row, &["regularMarketChangePercent", "raw"]),
+                        exchange: get_str(row, &["exchange"]),
+                        short_name: get_str(row, &["shortName"]),
+                        region: get_str(row, &["region"]),
+                        price: get_f64(row, &["regularMarketPrice"])
+                            .or_else(|| get_f64(row, &["price"])),
+                        change: get_f64(row, &["regularMarketChange"]),
+                        percent_change: get_f64(row, &["regularMarketChangePercent"]),
                     })
                     .collect()
             })
@@ -191,23 +188,4 @@ impl YfSession {
             summary,
         })
     }
-}
-
-fn dig_str(v: &serde_json::Value, path: &[&str]) -> Option<String> {
-    let mut cur = v;
-    for p in path {
-        cur = cur.get(p)?;
-    }
-    cur.as_str().map(String::from)
-}
-
-fn dig_f64(v: &serde_json::Value, path: &[&str]) -> Option<f64> {
-    let mut cur = v;
-    for p in path {
-        cur = cur.get(p)?;
-    }
-    if let Some(raw) = cur.get("raw") {
-        return raw.as_f64();
-    }
-    cur.as_f64()
 }

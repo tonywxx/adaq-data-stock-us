@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, YfError};
 use crate::http::YfSession;
+use crate::json::yf_result_first;
 
 /// Bar interval. Mirrors yfinance's `interval` argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,12 +162,8 @@ impl History {
         value: &serde_json::Value,
         opts: &HistoryOptions,
     ) -> Result<History> {
-        let result = value
-            .get("chart")
-            .and_then(|c| c.get("result"))
-            .and_then(|r| r.as_array())
-            .and_then(|a| a.first())
-            .ok_or_else(|| YfError::DataMissing("chart.result missing".into()))?;
+        let result = yf_result_first(value, "chart")
+            .map_err(|_| YfError::DataMissing("chart.result missing".into()))?;
 
         let meta = result
             .get("meta")
@@ -347,12 +344,8 @@ impl YfSession {
         {
             return Err(YfError::TickerMissing(format!("{ticker}: {desc}")));
         }
-        let result = value
-            .get("chart")
-            .and_then(|c| c.get("result"))
-            .and_then(|r| r.as_array())
-            .and_then(|a| a.first())
-            .ok_or_else(|| YfError::DataMissing("chart.result missing".into()))?;
+        let result = yf_result_first(&value, "chart")
+            .map_err(|_| YfError::DataMissing("chart.result missing".into()))?;
         let meta = result
             .get("meta")
             .cloned()
