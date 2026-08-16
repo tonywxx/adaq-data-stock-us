@@ -12,6 +12,9 @@ use crate::cache::Cache;
 use crate::config::Config;
 use crate::error::{Result, YfError};
 
+mod retry;
+use retry::{Decision, decide_status, decide_transport};
+
 const QUERY1: &str = "https://query1.finance.yahoo.com";
 const QUERY2: &str = "https://query2.finance.yahoo.com";
 const ROOT: &str = "https://finance.yahoo.com";
@@ -170,43 +173,51 @@ impl YfSession {
                     ),
                 )
                 .query(&qp);
-            let resp = req.send().await;
-            let resp = match resp {
+            let resp = match req.send().await {
                 Ok(r) => r,
-                Err(_e) if attempt < retries => {
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_secs(2u64.saturating_pow(attempt))).await;
-                    continue;
-                }
-                Err(e) => return Err(YfError::Http(e)),
+                Err(e) => match decide_transport(e, attempt, retries) {
+                    Decision::Retry { backoff, .. } => {
+                        attempt += 1;
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    Decision::GiveUp { error } => return Err(error),
+                    Decision::Success => unreachable!("transport error cannot be Success"),
+                },
             };
             let status = resp.status();
-            if status == 401 {
-                self.reset_auth();
-                if attempt < retries {
+            let decision =
+                decide_status(status.as_u16(), attempt, retries, /*retry_401=*/ true);
+            match decision {
+                Decision::Success => {
+                    let value: Value = resp.json().await?;
+                    return Ok(value);
+                }
+                Decision::Retry {
+                    backoff,
+                    reset_auth,
+                } => {
+                    if reset_auth {
+                        self.reset_auth();
+                    }
                     attempt += 1;
-                    tokio::time::sleep(Duration::from_secs(2u64.saturating_pow(attempt))).await;
+                    tokio::time::sleep(backoff).await;
                     continue;
                 }
-                return Err(YfError::msg("unauthorized (401) after retries"));
-            }
-            if status == 429 {
-                return Err(YfError::RateLimited);
-            }
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                if attempt < retries && status.is_server_error() {
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_secs(2u64.saturating_pow(attempt))).await;
-                    continue;
+                Decision::GiveUp { error } => {
+                    // On a terminal non-success status we surface the response
+                    // body for diagnostics, matching the prior behavior. Other
+                    // terminal errors (e.g. RateLimited, 401-after-retries
+                    // message) carry no body.
+                    match error {
+                        YfError::Status { status, .. } => {
+                            let body = resp.text().await.unwrap_or_default();
+                            return Err(YfError::Status { status, body });
+                        }
+                        other => return Err(other),
+                    }
                 }
-                return Err(YfError::Status {
-                    status: status.as_u16(),
-                    body,
-                });
             }
-            let value: Value = resp.json().await?;
-            return Ok(value);
         }
     }
 
@@ -228,30 +239,35 @@ impl YfSession {
                 .query(&params);
             let resp = match req.send().await {
                 Ok(r) => r,
-                Err(_e) if attempt < retries => {
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_secs(2u64.saturating_pow(attempt))).await;
-                    continue;
-                }
-                Err(e) => return Err(YfError::Http(e)),
+                Err(e) => match decide_transport(e, attempt, retries) {
+                    Decision::Retry { backoff, .. } => {
+                        attempt += 1;
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    Decision::GiveUp { error } => return Err(error),
+                    Decision::Success => unreachable!("transport error cannot be Success"),
+                },
             };
             let status = resp.status();
-            if status == 429 {
-                return Err(YfError::RateLimited);
-            }
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                if attempt < retries && status.is_server_error() {
+            // No crumb on text endpoints: a 401 is terminal (retry_401=false).
+            let decision =
+                decide_status(status.as_u16(), attempt, retries, /*retry_401=*/ false);
+            match decision {
+                Decision::Success => return Ok(resp.text().await?),
+                Decision::Retry { backoff, .. } => {
                     attempt += 1;
-                    tokio::time::sleep(Duration::from_secs(2u64.saturating_pow(attempt))).await;
+                    tokio::time::sleep(backoff).await;
                     continue;
                 }
-                return Err(YfError::Status {
-                    status: status.as_u16(),
-                    body,
-                });
+                Decision::GiveUp { error } => match error {
+                    YfError::Status { status, .. } => {
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(YfError::Status { status, body });
+                    }
+                    other => return Err(other),
+                },
             }
-            return Ok(resp.text().await?);
         }
     }
 
@@ -281,17 +297,19 @@ impl YfSession {
             .send()
             .await?;
         let status = resp.status();
-        if status == 429 {
-            return Err(YfError::RateLimited);
+        // Single attempt (no retry loop), so retries=0 makes every non-success
+        // decision terminal. Status policy is shared with get_json/get_text.
+        match decide_status(status.as_u16(), 0, 0, /*retry_401=*/ true) {
+            Decision::Success => Ok(resp.json().await?),
+            Decision::GiveUp { error } => match error {
+                YfError::Status { status, .. } => {
+                    let b = resp.text().await.unwrap_or_default();
+                    Err(YfError::Status { status, body: b })
+                }
+                other => Err(other),
+            },
+            Decision::Retry { .. } => unreachable!("retries=0 yields no Retry decision"),
         }
-        if !status.is_success() {
-            let b = resp.text().await.unwrap_or_default();
-            return Err(YfError::Status {
-                status: status.as_u16(),
-                body: b,
-            });
-        }
-        Ok(resp.json().await?)
     }
 
     /// Host constants, exposed for module implementations.
