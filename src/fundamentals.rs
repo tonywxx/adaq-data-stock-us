@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, YfError};
 use crate::http::YfSession;
+use crate::json::{get_f64, get_i64};
 use crate::quote::quote_summary;
 
 /// Frequency of a financial statement.
@@ -99,7 +100,7 @@ impl YfSession {
                     if k == "endDate" || k == "fiscalDateEnd" || k == "maxAge" {
                         continue;
                     }
-                    if let Some(val) = v.get("raw").and_then(|x| x.as_f64()) {
+                    if let Some(val) = get_f64(v, &[]) {
                         row.insert(k.clone(), Some(val));
                         item_set.insert(k.clone());
                     } else if v.is_null() {
@@ -172,12 +173,7 @@ fn dig_history<'a>(
 }
 
 fn period_date(period: &serde_json::Value) -> Option<String> {
-    let raw = period
-        .get("endDate")
-        .and_then(|e| e.get("raw"))
-        .and_then(|r| r.as_i64())
-        .or_else(|| period.get("endDate").and_then(|e| e.as_i64()))
-        .or_else(|| period.get("fiscalDateEnd").and_then(|e| e.as_i64()));
+    let raw = get_i64(period, &["endDate"]).or_else(|| get_i64(period, &["fiscalDateEnd"]));
     if let Some(sec) = raw
         && let Some(d) = chrono::DateTime::from_timestamp(sec, 0)
     {
