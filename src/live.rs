@@ -197,7 +197,7 @@ impl LiveWebSocket {
             eprintln!("live: subscribing to {:?}", subs);
         }
         let subscribe_msg = serde_json::json!({ "subscribe": subs }).to_string();
-        ws.send(WsMessage::Text(subscribe_msg))
+        ws.send(WsMessage::Text(subscribe_msg.into()))
             .await
             .map_err(|e| YfError::msg(format!("ws send: {e}")))?;
 
@@ -231,7 +231,7 @@ impl LiveWebSocket {
 
             if last_sub.elapsed() >= HEARTBEAT_INTERVAL {
                 let heartbeat = serde_json::json!({ "subscribe": subs }).to_string();
-                if let Err(e) = ws.send(WsMessage::Text(heartbeat)).await {
+                if let Err(e) = ws.send(WsMessage::Text(heartbeat.into())).await {
                     if self.verbose {
                         eprintln!("live: heartbeat error: {e}");
                     }
