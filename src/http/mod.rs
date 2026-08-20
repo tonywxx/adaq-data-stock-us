@@ -5,6 +5,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use primp::{Client, Impersonate};
 use serde_json::Value;
 
@@ -32,7 +33,7 @@ pub struct YfSession {
 }
 
 struct SessionInner {
-    client: Client,
+    transport: Arc<dyn Transport>,
     config: Config,
     cache: Cache,
     cookie_jar: Arc<primp::cookie::Jar>,
@@ -41,7 +42,7 @@ struct SessionInner {
 }
 
 impl YfSession {
-    /// Build a new session from config.
+    /// Build a new session from config, using the production `primp` transport.
     pub fn new(config: Config) -> Result<Self> {
         let cookie_jar = Arc::new(primp::cookie::Jar::default());
         let mut builder = Client::builder()
@@ -58,10 +59,23 @@ impl YfSession {
         let client = builder
             .build()
             .map_err(|e| YfError::msg(format!("build client: {e}")))?;
+        let transport: Arc<dyn Transport> = Arc::new(PrimpTransport { client });
+        Self::with_transport(config, transport, Some(cookie_jar))
+    }
+
+    /// Build a session around an explicit transport — used by offline tests to
+    /// inject a [`MockTransport`]. `cookie_jar` is created internally when
+    /// `None` (production path); tests may pass one to seed login cookies.
+    pub(crate) fn with_transport(
+        config: Config,
+        transport: Arc<dyn Transport>,
+        cookie_jar: Option<Arc<primp::cookie::Jar>>,
+    ) -> Result<Self> {
+        let cookie_jar = cookie_jar.unwrap_or_else(|| Arc::new(primp::cookie::Jar::default()));
         let cache = Cache::open(config.cache_dir.clone())?;
         let session = Self {
             inner: Arc::new(SessionInner {
-                client,
+                transport,
                 config,
                 cache,
                 cookie_jar: cookie_jar.clone(),
@@ -101,10 +115,14 @@ impl YfSession {
         // fc.yahoo.com is the endpoint yfinance uses to obtain the consent cookie.
         let _ = self
             .inner
-            .client
-            .get("https://fc.yahoo.com")
-            .header("accept", "*/*")
-            .send()
+            .transport
+            .send(TransportRequest {
+                method: TransportMethod::Get,
+                url: "https://fc.yahoo.com".to_string(),
+                headers: vec![("accept".to_string(), "*/*".to_string())],
+                query: vec![],
+                json_body: None,
+            })
             .await;
         *self.inner.cookie_ready.lock().unwrap() = true;
         Ok(())
@@ -119,12 +137,16 @@ impl YfSession {
         let url = format!("{QUERY1}/v1/test/getcrumb");
         let resp = self
             .inner
-            .client
-            .get(&url)
-            .header("accept", "*/*")
-            .send()
+            .transport
+            .send(TransportRequest {
+                method: TransportMethod::Get,
+                url,
+                headers: vec![("accept".to_string(), "*/*".to_string())],
+                query: vec![],
+                json_body: None,
+            })
             .await?;
-        let crumb = resp.text().await?.trim().to_string();
+        let crumb = String::from_utf8_lossy(&resp.body).trim().to_string();
         if !crumb.is_empty() {
             self.inner.cache.set_crumb(&crumb, CRUMB_TTL);
             *self.inner.crumb.lock().unwrap() = Some(crumb.clone());
@@ -140,40 +162,46 @@ impl YfSession {
     /// Perform a GET returning parsed JSON, with cookie/consent bootstrap, crumb
     /// injection, and retry/backoff. `base` is the host-prefixed path-less URL.
     pub async fn get_json(&self, url: &str, params: &[(&str, String)]) -> Result<Value> {
-        let mut qp: Vec<(String, String)> = params
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect();
-        let crumb = self.get_crumb().await.unwrap_or_default();
-        if !crumb.is_empty() {
-            qp.push(("crumb".to_string(), crumb));
-        }
-        if !self.inner.config.locale.lang.is_empty() {
-            qp.push(("lang".to_string(), self.inner.config.locale.lang.clone()));
-            qp.push((
-                "region".to_string(),
-                self.inner.config.locale.region.clone(),
-            ));
-        }
-
         let retries = self.inner.config.retries;
         let mut attempt: u32 = 0;
         loop {
             self.ensure_cookie().await?;
-            let req = self
-                .inner
-                .client
-                .get(url)
-                .header("accept", "*/*")
-                .header(
-                    "accept-language",
-                    format!(
-                        "{}-{}",
-                        self.inner.config.locale.lang, self.inner.config.locale.region
+            // Crumb is (re)fetched on every attempt: a 401 invalidates it via
+            // `reset_auth`, and the next attempt must send a fresh crumb rather
+            // than the stale one captured before the loop. On a cache hit this
+            // is a cheap in-memory/sqlite lookup, so retried calls stay cheap.
+            let crumb = self.get_crumb().await.unwrap_or_default();
+            let mut qp: Vec<(String, String)> = params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect();
+            if !crumb.is_empty() {
+                qp.push(("crumb".to_string(), crumb));
+            }
+            if !self.inner.config.locale.lang.is_empty() {
+                qp.push(("lang".to_string(), self.inner.config.locale.lang.clone()));
+                qp.push((
+                    "region".to_string(),
+                    self.inner.config.locale.region.clone(),
+                ));
+            }
+            let req = TransportRequest {
+                method: TransportMethod::Get,
+                url: url.to_string(),
+                headers: vec![
+                    ("accept".to_string(), "*/*".to_string()),
+                    (
+                        "accept-language".to_string(),
+                        format!(
+                            "{}-{}",
+                            self.inner.config.locale.lang, self.inner.config.locale.region
+                        ),
                     ),
-                )
-                .query(&qp);
-            let resp = match req.send().await {
+                ],
+                query: qp.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                json_body: None,
+            };
+            let resp = match self.inner.transport.send(req).await {
                 Ok(r) => r,
                 Err(e) => match decide_transport(e, attempt, retries) {
                     Decision::Retry { backoff, .. } => {
@@ -185,12 +213,11 @@ impl YfSession {
                     Decision::Success => unreachable!("transport error cannot be Success"),
                 },
             };
-            let status = resp.status();
-            let decision =
-                decide_status(status.as_u16(), attempt, retries, /*retry_401=*/ true);
+            let status = resp.status;
+            let decision = decide_status(status, attempt, retries, /*retry_401=*/ true);
             match decision {
                 Decision::Success => {
-                    let value: Value = resp.json().await?;
+                    let value: Value = serde_json::from_slice(&resp.body)?;
                     return Ok(value);
                 }
                 Decision::Retry {
@@ -211,7 +238,7 @@ impl YfSession {
                     // message) carry no body.
                     match error {
                         YfError::Status { status, .. } => {
-                            let body = resp.text().await.unwrap_or_default();
+                            let body = String::from_utf8_lossy(&resp.body).to_string();
                             return Err(YfError::Status { status, body });
                         }
                         other => return Err(other),
@@ -231,13 +258,17 @@ impl YfSession {
         let mut attempt: u32 = 0;
         loop {
             self.ensure_cookie().await?;
-            let req = self
-                .inner
-                .client
-                .get(url)
-                .header("accept", "*/*")
-                .query(&params);
-            let resp = match req.send().await {
+            let req = TransportRequest {
+                method: TransportMethod::Get,
+                url: url.to_string(),
+                headers: vec![("accept".to_string(), "*/*".to_string())],
+                query: params
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+                json_body: None,
+            };
+            let resp = match self.inner.transport.send(req).await {
                 Ok(r) => r,
                 Err(e) => match decide_transport(e, attempt, retries) {
                     Decision::Retry { backoff, .. } => {
@@ -249,12 +280,11 @@ impl YfSession {
                     Decision::Success => unreachable!("transport error cannot be Success"),
                 },
             };
-            let status = resp.status();
+            let status = resp.status;
             // No crumb on text endpoints: a 401 is terminal (retry_401=false).
-            let decision =
-                decide_status(status.as_u16(), attempt, retries, /*retry_401=*/ false);
+            let decision = decide_status(status, attempt, retries, /*retry_401=*/ false);
             match decision {
-                Decision::Success => return Ok(resp.text().await?),
+                Decision::Success => return Ok(String::from_utf8_lossy(&resp.body).to_string()),
                 Decision::Retry { backoff, .. } => {
                     attempt += 1;
                     tokio::time::sleep(backoff).await;
@@ -262,7 +292,7 @@ impl YfSession {
                 }
                 Decision::GiveUp { error } => match error {
                     YfError::Status { status, .. } => {
-                        let body = resp.text().await.unwrap_or_default();
+                        let body = String::from_utf8_lossy(&resp.body).to_string();
                         return Err(YfError::Status { status, body });
                     }
                     other => return Err(other),
@@ -288,22 +318,26 @@ impl YfSession {
         }
         let resp = self
             .inner
-            .client
-            .post(url)
-            .header("accept", "*/*")
-            .header("content-type", "application/json")
-            .query(&qp)
-            .json(body)
-            .send()
+            .transport
+            .send(TransportRequest {
+                method: TransportMethod::Post,
+                url: url.to_string(),
+                headers: vec![
+                    ("accept".to_string(), "*/*".to_string()),
+                    ("content-type".to_string(), "application/json".to_string()),
+                ],
+                query: qp.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                json_body: Some(body.clone()),
+            })
             .await?;
-        let status = resp.status();
+        let status = resp.status;
         // Single attempt (no retry loop), so retries=0 makes every non-success
         // decision terminal. Status policy is shared with get_json/get_text.
-        match decide_status(status.as_u16(), 0, 0, /*retry_401=*/ true) {
-            Decision::Success => Ok(resp.json().await?),
+        match decide_status(status, 0, 0, /*retry_401=*/ true) {
+            Decision::Success => Ok(serde_json::from_slice(&resp.body)?),
             Decision::GiveUp { error } => match error {
                 YfError::Status { status, .. } => {
-                    let b = resp.text().await.unwrap_or_default();
+                    let b = String::from_utf8_lossy(&resp.body).to_string();
                     Err(YfError::Status { status, body: b })
                 }
                 other => Err(other),
@@ -329,6 +363,79 @@ pub struct Urls {
     pub root: &'static str,
 }
 
+// --- Transport seam ---------------------------------------------------------
+//
+// Every endpoint method in this module ultimately needs one thing from the
+// network: "send this request, give me back a status + body". That single
+// step is the seam. `YfSession` still owns the *policy* — crumb injection,
+// locale append, consent bootstrap, and the retry loop driven by
+// `decide_status`/`decide_transport` — and only delegates the raw send to a
+// `Transport`. Swapping in a `MockTransport` therefore exercises the glue
+// (crumb, retry, error mapping) offline; the real `PrimpTransport` is the
+// production default.
+
+/// A request handed to a [`Transport`]. Built by the session glue after crumb
+/// and locale have already been appended to `query`.
+#[derive(Clone)]
+pub(crate) struct TransportRequest {
+    pub method: TransportMethod,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub query: Vec<(String, String)>,
+    pub json_body: Option<Value>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TransportMethod {
+    Get,
+    Post,
+}
+
+/// The minimal response the session glue needs: an HTTP status and a body.
+/// Headers/cookies are request-side only in this module, so they are not
+/// modelled here.
+pub(crate) struct TransportResponse {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+/// The injectable network seam. Implemented by [`PrimpTransport`] in
+/// production and by the test `MockTransport`.
+#[async_trait]
+pub(crate) trait Transport: Send + Sync {
+    async fn send(&self, req: TransportRequest) -> Result<TransportResponse>;
+}
+
+/// Production transport wrapping a `primp` (reqwest-compatible) client. Builds
+/// the request from a [`TransportRequest`] and returns status + body bytes.
+struct PrimpTransport {
+    client: Client,
+}
+
+#[async_trait]
+impl Transport for PrimpTransport {
+    async fn send(&self, req: TransportRequest) -> Result<TransportResponse> {
+        let mut builder = match req.method {
+            TransportMethod::Get => self.client.get(&req.url),
+            TransportMethod::Post => self.client.post(&req.url),
+        };
+        for (k, v) in &req.headers {
+            builder = builder.header(k, v);
+        }
+        builder = builder.query(&req.query);
+        if let Some(body) = req.json_body {
+            builder = builder.json(&body);
+        }
+        let resp = builder.send().await?;
+        let status = resp.status().as_u16();
+        let body = resp.bytes().await?;
+        Ok(TransportResponse {
+            status,
+            body: body.to_vec(),
+        })
+    }
+}
+
 // --- Authentication (mirrors yfinance `Auth`) ---
 
 impl YfSession {
@@ -339,13 +446,17 @@ impl YfSession {
     async fn subscriptions(&self) -> Result<(u16, Value)> {
         let resp = self
             .inner
-            .client
-            .get(SUBSCRIPTIONS_URL)
-            .header("accept", "*/*")
-            .send()
+            .transport
+            .send(TransportRequest {
+                method: TransportMethod::Get,
+                url: SUBSCRIPTIONS_URL.to_string(),
+                headers: vec![("accept".to_string(), "*/*".to_string())],
+                query: vec![],
+                json_body: None,
+            })
             .await?;
-        let status = resp.status().as_u16();
-        let value: Value = resp.json().await.unwrap_or(Value::Null);
+        let status = resp.status;
+        let value: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
         Ok((status, value))
     }
 
@@ -424,5 +535,356 @@ impl YfSession {
             .and_then(|r| r.get("guid"))
             .and_then(|g| g.as_str())
             .map(String::from))
+    }
+}
+
+// --- Offline test double ----------------------------------------------------
+
+#[cfg(test)]
+pub(crate) struct MockTransport {
+    handler: Arc<dyn Fn(&TransportRequest) -> Result<TransportResponse> + Send + Sync>,
+    recorded: Mutex<Vec<TransportRequest>>,
+}
+
+#[cfg(test)]
+impl MockTransport {
+    pub(crate) fn new(
+        handler: impl Fn(&TransportRequest) -> Result<TransportResponse> + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            handler: Arc::new(handler),
+            recorded: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Every request the session has driven through this transport, in order.
+    pub(crate) fn requests(&self) -> Vec<TransportRequest> {
+        self.recorded.lock().unwrap().clone()
+    }
+
+    /// Find the first recorded request whose URL contains `sub`.
+    pub(crate) fn find(&self, sub: &str) -> Option<TransportRequest> {
+        self.requests().into_iter().find(|r| r.url.contains(sub))
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl Transport for MockTransport {
+    async fn send(&self, req: TransportRequest) -> Result<TransportResponse> {
+        self.recorded.lock().unwrap().push(req.clone());
+        (self.handler)(&req)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use serde_json::{Value, json};
+
+    use crate::config::Config;
+    use crate::error::{Result as YfResult, YfError};
+
+    /// A throwaway cache dir per test so crumb caching never leaks between
+    /// cases (the default `None` dir is shared process-wide).
+    fn unique_cache_dir() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("adaq-http-test-{}-{}", std::process::id(), n))
+    }
+
+    fn resp(status: u16, body: &str) -> YfResult<TransportResponse> {
+        Ok(TransportResponse {
+            status,
+            body: body.as_bytes().to_vec(),
+        })
+    }
+
+    /// Build a session backed by `transport`, with an isolated cache.
+    fn session(retries: u32, transport: Arc<MockTransport>) -> YfSession {
+        let cfg = Config::default()
+            .retries(retries)
+            .cache_dir(unique_cache_dir());
+        YfSession::with_transport(cfg, transport, None).expect("session")
+    }
+
+    /// A handler that serves the consent bootstrap + crumb, then delegates the
+    /// *actual* request (anything not fc.yahoo.com / getcrumb) to `actual`.
+    fn handler_with(
+        actual: impl Fn(&TransportRequest) -> YfResult<TransportResponse> + Send + Sync + 'static,
+    ) -> impl Fn(&TransportRequest) -> YfResult<TransportResponse> + Send + Sync + 'static {
+        move |req: &TransportRequest| {
+            if req.url.contains("getcrumb") {
+                return resp(200, "test-crumb");
+            }
+            if req.url == "https://fc.yahoo.com" {
+                return resp(200, "");
+            }
+            actual(req)
+        }
+    }
+
+    fn query_map(req: &TransportRequest) -> std::collections::HashMap<String, String> {
+        req.query
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn get_json_parses_and_injects_crumb_locale() {
+        let t = MockTransport::new(handler_with(|_| resp(200, r#"{"ok":true}"#)));
+        let s = session(0, t.clone());
+        let v: Value = s
+            .get_json(
+                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+                &[("interval", "1d".into())],
+            )
+            .await
+            .expect("ok");
+        assert_eq!(v["ok"], true);
+
+        let actual = t.find("chart/AAPL").expect("actual request recorded");
+        let q = query_map(&actual);
+        assert_eq!(q.get("crumb"), Some(&"test-crumb".to_string()));
+        assert_eq!(q.get("lang"), Some(&"en".to_string()));
+        assert_eq!(q.get("region"), Some(&"US".to_string()));
+        assert_eq!(q.get("interval"), Some(&"1d".to_string()));
+        assert!(
+            actual
+                .headers
+                .iter()
+                .any(|(k, v)| k == "accept-language" && v == "en-US")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_json_retries_on_5xx_then_succeeds() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let c = calls.clone();
+        let t = MockTransport::new(handler_with(move |_| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                resp(503, "try later")
+            } else {
+                resp(200, r#"{"ok":true}"#)
+            }
+        }));
+        let s = session(2, t.clone());
+        let v: Value = s
+            .get_json(
+                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+                &[],
+            )
+            .await
+            .expect("ok after retries");
+        assert_eq!(v["ok"], true);
+        // 503, 503, 200 -> three actual attempts; crumb stays cached after first.
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(t.find("getcrumb").is_some(), true);
+    }
+
+    #[tokio::test]
+    async fn get_json_401_retries_with_reset_auth() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let c = calls.clone();
+        let t = MockTransport::new(handler_with(move |_| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                resp(401, "expired")
+            } else {
+                resp(200, r#"{"ok":true}"#)
+            }
+        }));
+        let s = session(2, t.clone());
+        let v: Value = s
+            .get_json(
+                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+                &[],
+            )
+            .await
+            .expect("recovered after 401");
+        assert_eq!(v["ok"], true);
+        // 401 then 200 -> two actual attempts; reset_auth forces a crumb re-fetch.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let crumb_hits = t
+            .requests()
+            .iter()
+            .filter(|r| r.url.contains("getcrumb"))
+            .count();
+        assert_eq!(crumb_hits, 2, "crumb re-fetched after reset_auth");
+    }
+
+    #[tokio::test]
+    async fn get_json_429_gives_up_immediately() {
+        let t = MockTransport::new(handler_with(|_| resp(429, "rate limited")));
+        let s = session(3, t.clone());
+        let err = s
+            .get_json(
+                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+                &[],
+            )
+            .await
+            .expect_err("429 must not retry");
+        assert!(matches!(err, YfError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn get_json_404_gives_up_with_status_body() {
+        let t = MockTransport::new(handler_with(|_| resp(404, r#"{"error":"not found"}"#)));
+        let s = session(0, t.clone());
+        let err = s
+            .get_json(
+                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+                &[],
+            )
+            .await
+            .expect_err("404 is terminal");
+        match err {
+            YfError::Status { status, body } => {
+                assert_eq!(status, 404);
+                assert!(body.contains("not found"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_text_success_without_crumb() {
+        let t = MockTransport::new(handler_with(|_| resp(200, "<html>hi</html>")));
+        let s = session(0, t.clone());
+        let body = s
+            .get_text("https://query2.finance.yahoo.com/suggest/ISIN", &[])
+            .await
+            .expect("ok");
+        assert_eq!(body, "<html>hi</html>");
+        let actual = t.find("suggest/ISIN").expect("actual recorded");
+        assert!(
+            !query_map(&actual).contains_key("crumb"),
+            "text endpoint never adds crumb"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_text_401_not_retried() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let c = calls.clone();
+        let t = MockTransport::new(handler_with(move |_| {
+            c.fetch_add(1, Ordering::SeqCst);
+            resp(401, "forbidden")
+        }));
+        let s = session(3, t.clone());
+        let err = s
+            .get_text("https://query2.finance.yahoo.com/suggest/ISIN", &[])
+            .await
+            .expect_err("text 401 is terminal");
+        assert!(matches!(err, YfError::Msg(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no retry on text 401");
+    }
+
+    #[tokio::test]
+    async fn post_json_success() {
+        let t = MockTransport::new(handler_with(|req| {
+            assert_eq!(req.method, TransportMethod::Post);
+            assert!(req.json_body.is_some(), "post body forwarded");
+            resp(200, r#"{"posted":true}"#)
+        }));
+        let s = session(0, t.clone());
+        let v: Value = s
+            .post_json(
+                "https://query1.finance.yahoo.com/v1/portal/data",
+                &[],
+                &json!({"a": 1}),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(v["posted"], true);
+    }
+
+    #[tokio::test]
+    async fn post_json_error_propagates() {
+        let t = MockTransport::new(handler_with(|_| resp(500, "boom")));
+        let s = session(0, t.clone());
+        let err = s
+            .post_json(
+                "https://query1.finance.yahoo.com/v1/portal/data",
+                &[],
+                &json!({}),
+            )
+            .await
+            .expect_err("500 terminal");
+        match err {
+            YfError::Status { status, .. } => assert_eq!(status, 500),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn crumb_is_cached_across_calls() {
+        let t = MockTransport::new(handler_with(|_| resp(200, r#"{"ok":true}"#)));
+        let s = session(0, t.clone());
+        let _ = s
+            .get_json(
+                "https://query1.finance.yahoo.com/v8/finance/chart/AAPL",
+                &[],
+            )
+            .await
+            .unwrap();
+        let _ = s
+            .get_json(
+                "https://query1.finance.yahoo.com/v8/finance/chart/MSFT",
+                &[],
+            )
+            .await
+            .unwrap();
+        let crumb_hits = t
+            .requests()
+            .iter()
+            .filter(|r| r.url.contains("getcrumb"))
+            .count();
+        assert_eq!(crumb_hits, 1, "crumb fetched once then served from cache");
+    }
+
+    #[tokio::test]
+    async fn check_login_true_when_guid_present() {
+        let t = MockTransport::new(move |req: &TransportRequest| {
+            if req.url.contains("subscriptions") {
+                resp(200, r#"{"result":{"guid":"abc-123"}}"#)
+            } else {
+                resp(200, "")
+            }
+        });
+        let s = session(0, t.clone());
+        assert!(s.check_login().await.expect("ok"));
+    }
+
+    #[tokio::test]
+    async fn check_login_false_without_guid() {
+        let t = MockTransport::new(move |req: &TransportRequest| {
+            if req.url.contains("subscriptions") {
+                resp(200, r#"{"result":{}}"#)
+            } else {
+                resp(200, "")
+            }
+        });
+        let s = session(0, t.clone());
+        assert!(!s.check_login().await.expect("ok"));
+    }
+
+    #[tokio::test]
+    async fn set_login_cookies_reports_validity() {
+        let t = MockTransport::new(move |req: &TransportRequest| {
+            if req.url.contains("subscriptions") {
+                resp(200, r#"{"result":{"guid":"user-guid"}}"#)
+            } else {
+                resp(200, "")
+            }
+        });
+        let s = session(0, t.clone());
+        assert!(s.set_login_cookies("TVAL", "YVAL").await.expect("ok"));
     }
 }

@@ -42,6 +42,7 @@ for fetching US (and global) equity market data from Yahoo Finance.
 - [Parity with yfinance](#parity-with-yfinance)
 - [Examples](#examples)
 - [Project Layout](#project-layout)
+- [Changelog](#changelog)
 - [License](#license)
 
 ---
@@ -675,6 +676,13 @@ docs/
 vendor/yfinance/  vendored yfinance submodule (pinned)
 xtask/            cargo xtask parity drift checker
 ```
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the full bilingual (English / 简体中文)
+release history.
 
 ---
 

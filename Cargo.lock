@@ -4,8 +4,9 @@ version = 4
 
 [[package]]
 name = "adaq-data-stock-us"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "chrono",
  "futures",
